@@ -261,6 +261,167 @@ void test_operand_resolution() {
            "immediate source is an unsigned integer");
 }
 
+struct VmNodeStorage {
+    ubcm::RegisterHandle nodes;
+    ubcm::RegisterHandle state;
+    ubcm::NodeReference next;
+};
+
+VmNodeStorage install_branching_nodes(ubcm::RegisterBank& registers,
+                                      ubcm::BuiltinCommand command) {
+    ubcm::Node first;
+    first.command = static_cast<std::uint8_t>(command);
+    ubcm::Node second;
+    second.command = static_cast<std::uint8_t>(ubcm::BuiltinCommand::branch);
+    auto first_bits = ubcm::encode_node(first);
+    auto second_bits = ubcm::encode_node(second);
+    expect(first_bits && second_bits, "encode builtin nodes");
+    auto node_bits = *first_bits;
+    node_bits.append(*second_bits);
+    auto nodes = registers.create(ubcm::RegisterClass::global, node_bits);
+    expect(nodes.has_value(), "create builtin node storage");
+    const auto next = ubcm::RuntimeReference::at(*nodes, ubcm::node_bit_size);
+    first.next0 = next;
+    first.next1 = next;
+    first_bits = ubcm::encode_node(first);
+    expect(first_bits.has_value(), "link builtin nodes");
+    expect(registers.write({*nodes, 0}, *first_bits).has_value(),
+           "store linked builtin node");
+    auto state_bits = ubcm::encode_runtime_reference(
+        ubcm::RuntimeReference::at(*nodes, 0));
+    expect(state_bits.has_value(), "encode builtin state");
+    auto state = registers.create(ubcm::RegisterClass::global, *state_bits);
+    expect(state.has_value(), "create builtin state");
+    return {*nodes, *state, next};
+}
+
+void test_vm_core_builtin_effects() {
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        auto target_name = *ubcm::BitVector::from_bit_string("1");
+        auto target = registers.create(ubcm::RegisterClass::global,
+                                       *ubcm::BitVector::from_bit_string("00000"));
+        expect(target && globals.bind(target_name, *target), "bind copy target");
+        const ubcm::SourceOperand source{std::uint64_t{5}, 0, true};
+        const ubcm::DestinationOperand destination{ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, target_name}, 1}}};
+        auto program = ubcm::encode_source(source);
+        program.append(ubcm::encode_destination(destination));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(registers, ubcm::BuiltinCommand::copy);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        expect(vm.step().has_value(), "execute copy builtin");
+        expect(registers.read({*target, 0}, 5)->to_bit_string() == "01010",
+               "copy writes raw source bits and clears suffix");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        auto target_name = *ubcm::BitVector::from_bit_string("1");
+        auto target = registers.create(ubcm::RegisterClass::global,
+                                       *ubcm::BitVector::from_bit_string("00"));
+        expect(target && globals.bind(target_name, *target), "bind short copy target");
+        const ubcm::SourceOperand source{std::uint64_t{5}, 0, true};
+        const ubcm::DestinationOperand destination{ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, target_name}, 0}}};
+        auto program = ubcm::encode_source(source);
+        program.append(ubcm::encode_destination(destination));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(registers, ubcm::BuiltinCommand::copy);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        expect(!vm.step() && vm.current_activation().procedure_position == 0,
+               "failed copy preserves procedure cursor");
+        auto state = registers.read({node_storage.state, 0},
+                                    ubcm::runtime_reference_bit_size);
+        ubcm::BitCursor state_cursor(*state);
+        expect(ubcm::decode_runtime_reference(state_cursor) ==
+                   ubcm::RuntimeReference::at(node_storage.nodes, 0),
+               "failed copy preserves network state");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        const ubcm::SourceOperand source{std::uint64_t{0}, 0, true};
+        auto program = ubcm::encode_source(source);
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::set_procedure_position);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation);
+        expect(vm.step() && vm.current_activation().procedure_position == 0,
+               "set position overrides decoded cursor position");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        auto target_name = *ubcm::BitVector::from_bit_string("10");
+        auto target = registers.create(ubcm::RegisterClass::global,
+                                       *ubcm::BitVector::from_bit_string("101"));
+        expect(target && globals.bind(target_name, *target), "bind resize target");
+        const ubcm::RegisterSelector selector{ubcm::RegisterClass::global, target_name};
+        const ubcm::SourceOperand size{std::uint64_t{7}, 0, true};
+        auto program = ubcm::encode_register_selector(selector);
+        program.append(ubcm::encode_source(size));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::resize_register);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        expect(vm.step().has_value() && registers.size(*target) == 7,
+               "resize builtin changes register size");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        auto source_name = *ubcm::BitVector::from_bit_string("10");
+        auto destination_name = *ubcm::BitVector::from_bit_string("11");
+        auto source = registers.create(ubcm::RegisterClass::global,
+                                       *ubcm::BitVector::from_bit_string("10101"));
+        auto destination = registers.create(ubcm::RegisterClass::global, ubcm::BitVector(32));
+        expect(source && destination && globals.bind(source_name, *source) &&
+                   globals.bind(destination_name, *destination),
+               "bind get-size registers");
+        const ubcm::RegisterSelector selector{ubcm::RegisterClass::global, source_name};
+        const ubcm::DestinationOperand output{ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, destination_name}, 0}}};
+        auto program = ubcm::encode_register_selector(selector);
+        program.append(ubcm::encode_destination(output));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::get_register_size);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        expect(vm.step().has_value(), "execute get-size builtin");
+        auto output_bits = registers.read({*destination, 0}, 32);
+        ubcm::BitCursor output_cursor(*output_bits);
+        auto value = ubcm::decode_value(output_cursor);
+        expect(value && std::holds_alternative<std::uint64_t>(*value) &&
+                   std::get<std::uint64_t>(*value) == 5,
+               "get-size writes canonical Value");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -276,6 +437,7 @@ int main() {
         {"builtin_decoder", test_builtin_decoder},
         {"vm_branch_step", test_vm_branch_step},
         {"operand_resolution", test_operand_resolution},
+        {"vm_core_builtin_effects", test_vm_core_builtin_effects},
     };
     std::size_t failed = 0;
     for (const auto& test : tests) {

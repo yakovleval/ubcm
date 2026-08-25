@@ -17,10 +17,23 @@ VmError codec_error(const CodecError& source) {
     return error(VmErrorCode::decode_error, source.message);
 }
 
+VmError operand_error(const OperandError& source) {
+    return error(source.code == OperandErrorCode::decode_error
+                     ? VmErrorCode::decode_error
+                     : VmErrorCode::register_access,
+                 source.message);
+}
+
+struct PreparedWrite {
+    RegisterAddress address;
+    BitVector bits;
+};
+
 }  // namespace
 
-VirtualMachine::VirtualMachine(RegisterBank& registers, ActivationRecord activation)
-    : registers_(&registers), activation_(std::move(activation)) {}
+VirtualMachine::VirtualMachine(RegisterBank& registers, ActivationRecord activation,
+                               OperandResolvers resolvers)
+    : registers_(&registers), activation_(std::move(activation)), resolvers_(resolvers) {}
 
 const ActivationRecord& VirtualMachine::current_activation() const noexcept {
     return activation_;
@@ -74,6 +87,62 @@ VmResult<void> VirtualMachine::validate_node_target(
     return {};
 }
 
+VmResult<void> VirtualMachine::validate_network_state_write() const {
+    if (activation_.network_state.null) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "activation has no writable network state"));
+    }
+    auto immutable = registers_->is_immutable(activation_.network_state.handle);
+    if (!immutable) return std::unexpected(register_error(immutable.error()));
+    if (*immutable) {
+        return std::unexpected(error(VmErrorCode::register_access,
+                                     "network state register is immutable"));
+    }
+    auto size = registers_->size(activation_.network_state.handle);
+    if (!size) return std::unexpected(register_error(size.error()));
+    if (activation_.network_state.bit_offset > *size ||
+        runtime_reference_bit_size > *size - activation_.network_state.bit_offset) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "network state cell is out of range"));
+    }
+    return {};
+}
+
+VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
+                                                       std::uint64_t bit_size,
+                                                       const NodeReference& current,
+                                                       const NodeReference& next) const {
+    auto immutable = registers_->is_immutable(handle);
+    if (!immutable) return std::unexpected(register_error(immutable.error()));
+    if (*immutable) {
+        return std::unexpected(error(VmErrorCode::register_access,
+                                     "register is immutable"));
+    }
+    if (bit_size == 0U &&
+        (handle == activation_.procedure || handle == activation_.network_state.handle ||
+         handle == current.handle || handle == activation_.result_register ||
+         (!activation_.local_resolver.null && handle == activation_.local_resolver.handle))) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "cannot delete a register used by the active VM state"));
+    }
+    const auto fits = [handle, bit_size](const RuntimeReference& reference,
+                                         std::uint64_t required_size) {
+        return reference.null || handle != reference.handle ||
+               reference.bit_offset <= bit_size &&
+                   required_size <= bit_size - reference.bit_offset;
+    };
+    if (!fits(activation_.network_state, runtime_reference_bit_size) ||
+        !fits(current, node_bit_size) || !fits(next, node_bit_size)) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "resize would invalidate an active VM reference"));
+    }
+    return {};
+}
+
+OperandResolver VirtualMachine::operand_resolver() const {
+    return OperandResolver(*registers_, activation_.procedure, resolvers_);
+}
+
 VmResult<StepResult> VirtualMachine::step() {
     if (activation_.prefix.kind != PrefixKind::none) {
         return std::unexpected(error(VmErrorCode::unsupported_command,
@@ -106,18 +175,113 @@ VmResult<StepResult> VirtualMachine::step() {
     if (!instruction) {
         return std::unexpected(codec_error(instruction.error()));
     }
-    if (instruction->command != BuiltinCommand::branch) {
+    if (!instruction->branch) {
         return std::unexpected(error(VmErrorCode::unsupported_command,
-                                     "builtin effect belongs to the next VM stage"));
+                                     "builtin command has no branch transition yet"));
     }
-
     const auto next = *instruction->branch ? node->next1 : node->next0;
     if (auto valid = validate_node_target(next); !valid) {
+        return std::unexpected(valid.error());
+    }
+    if (auto valid = validate_network_state_write(); !valid) {
         return std::unexpected(valid.error());
     }
     auto encoded_next = encode_runtime_reference(next);
     if (!encoded_next) {
         return std::unexpected(codec_error(encoded_next.error()));
+    }
+
+    const auto resolver = operand_resolver();
+    std::optional<PreparedWrite> data_write;
+    std::optional<std::pair<RegisterHandle, std::uint64_t>> resize;
+    auto next_position = instruction->next_procedure_position;
+
+    switch (instruction->command) {
+        case BuiltinCommand::branch:
+            break;
+        case BuiltinCommand::copy: {
+            const auto& arguments = std::get<CopyArguments>(instruction->arguments);
+            auto value = resolver.read_source_bits(arguments.source);
+            if (!value) return std::unexpected(operand_error(value.error()));
+            auto address = resolver.resolve_destination(arguments.destination);
+            if (!address) return std::unexpected(operand_error(address.error()));
+            auto size = registers_->size(address->handle);
+            if (!size) return std::unexpected(register_error(size.error()));
+            if (address->bit_offset > *size) {
+                return std::unexpected(error(VmErrorCode::register_access,
+                                             "destination offset is out of range"));
+            }
+            if (auto valid = resolver.validate_destination(*address, value->size()); !valid) {
+                return std::unexpected(operand_error(valid.error()));
+            }
+            BitVector stored = *value;
+            stored.resize(*size - address->bit_offset);
+            data_write = PreparedWrite{*address, std::move(stored)};
+            break;
+        }
+        case BuiltinCommand::set_procedure_position: {
+            const auto& arguments = std::get<OneSourceArguments>(instruction->arguments);
+            auto position = resolver.read_source_uint(arguments.source);
+            if (!position) return std::unexpected(operand_error(position.error()));
+            if (*position > (*procedure)->size()) {
+                return std::unexpected(error(VmErrorCode::invalid_state,
+                                             "new procedure position is out of range"));
+            }
+            next_position = *position;
+            break;
+        }
+        case BuiltinCommand::resize_register: {
+            const auto& arguments = std::get<ResizeArguments>(instruction->arguments);
+            auto address = resolver.resolve_address({arguments.selector, 0});
+            if (!address) return std::unexpected(operand_error(address.error()));
+            auto size = resolver.read_source_uint(arguments.size);
+            if (!size) return std::unexpected(operand_error(size.error()));
+            if (auto valid = validate_resize_target(address->handle, *size,
+                                                    *current_reference, next);
+                !valid) {
+                return std::unexpected(valid.error());
+            }
+            resize = std::pair{address->handle, *size};
+            break;
+        }
+        case BuiltinCommand::get_register_size: {
+            const auto& arguments = std::get<GetSizeArguments>(instruction->arguments);
+            auto address = resolver.resolve_address({arguments.selector, 0});
+            if (!address) return std::unexpected(operand_error(address.error()));
+            auto register_size = registers_->size(address->handle);
+            if (!register_size) return std::unexpected(register_error(register_size.error()));
+            auto value = encode_value(*register_size);
+            if (!value) return std::unexpected(codec_error(value.error()));
+            auto destination = resolver.resolve_destination(arguments.destination);
+            if (!destination) return std::unexpected(operand_error(destination.error()));
+            auto destination_size = registers_->size(destination->handle);
+            if (!destination_size) {
+                return std::unexpected(register_error(destination_size.error()));
+            }
+            if (destination->bit_offset > *destination_size) {
+                return std::unexpected(error(VmErrorCode::register_access,
+                                             "destination offset is out of range"));
+            }
+            if (auto valid = resolver.validate_destination(*destination, value->size()); !valid) {
+                return std::unexpected(operand_error(valid.error()));
+            }
+            BitVector stored = *value;
+            stored.resize(*destination_size - destination->bit_offset);
+            data_write = PreparedWrite{*destination, std::move(stored)};
+            break;
+        }
+        default:
+            return std::unexpected(error(VmErrorCode::unsupported_command,
+                                         "builtin effect belongs to a later VM stage"));
+    }
+
+    if (data_write) {
+        auto written = registers_->write(data_write->address, data_write->bits);
+        if (!written) return std::unexpected(register_error(written.error()));
+    }
+    if (resize) {
+        auto resized = registers_->resize(resize->first, resize->second);
+        if (!resized) return std::unexpected(register_error(resized.error()));
     }
 
     auto written = registers_->write(
@@ -126,7 +290,7 @@ VmResult<StepResult> VirtualMachine::step() {
     if (!written) {
         return std::unexpected(register_error(written.error()));
     }
-    activation_.procedure_position = instruction->next_procedure_position;
+    activation_.procedure_position = next_position;
     return StepResult{instruction->command, *instruction->branch, next,
                       activation_.procedure_position};
 }

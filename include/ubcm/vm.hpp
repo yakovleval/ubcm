@@ -2,6 +2,7 @@
 
 #include "ubcm/activation.hpp"
 #include "ubcm/builtin.hpp"
+#include "ubcm/operand.hpp"
 
 #include <cstdint>
 #include <expected>
@@ -33,7 +34,8 @@ struct StepResult {
 
 class VirtualMachine {
 public:
-    VirtualMachine(RegisterBank& registers, ActivationRecord activation);
+    VirtualMachine(RegisterBank& registers, ActivationRecord activation,
+                   OperandResolvers resolvers = {});
 
     [[nodiscard]] const ActivationRecord& current_activation() const noexcept;
     [[nodiscard]] VmResult<StepResult> step();
@@ -43,9 +45,16 @@ private:
     [[nodiscard]] VmResult<Node> read_node(const NodeReference& reference) const;
     [[nodiscard]] VmResult<void> validate_node_target(
         const NodeReference& reference) const;
+    [[nodiscard]] VmResult<void> validate_network_state_write() const;
+    [[nodiscard]] VmResult<void> validate_resize_target(RegisterHandle handle,
+                                                        std::uint64_t bit_size,
+                                                        const NodeReference& current,
+                                                        const NodeReference& next) const;
+    [[nodiscard]] OperandResolver operand_resolver() const;
 
     RegisterBank* registers_;
     ActivationRecord activation_;
+    OperandResolvers resolvers_;
 };
 
 }  // namespace ubcm
