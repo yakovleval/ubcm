@@ -92,6 +92,57 @@ void test_registers_and_addressing() {
     expect(ubcm::resolve_selector(selector, context) && *ubcm::resolve_selector(selector, context) == handle, "selector resolution");
 }
 
+void test_runtime_references_and_nodes() {
+    const auto global3 = ubcm::RegisterHandle{ubcm::RegisterClass::global, 3};
+    const auto global4 = ubcm::RegisterHandle{ubcm::RegisterClass::global, 4};
+    const auto reference = ubcm::RuntimeReference::at(global3, 592);
+    auto encoded_reference = ubcm::encode_runtime_reference(reference);
+    expect(encoded_reference && encoded_reference->size() == 128,
+           "runtime reference width");
+    ubcm::BitCursor reference_cursor(*encoded_reference);
+    expect(ubcm::decode_runtime_reference(reference_cursor) == reference,
+           "runtime reference round trip");
+
+    ubcm::Node node;
+    node.command = 0b0100;
+    node.next0 = ubcm::RuntimeReference::at(global3, 0);
+    node.next1 = reference;
+    node.superlocal_resolver = ubcm::RuntimeReference::at(global4, 0);
+    auto encoded = ubcm::encode_node(node);
+    expect(encoded && encoded->size() == ubcm::node_bit_size, "node width");
+    expect(encoded->bytes()[0] == 0x00 && encoded->bytes()[1] == 0x04,
+           "builtin node header");
+    expect(ubcm::decode_node(*encoded) == node, "node round trip");
+
+    node.next1.bit_offset = 1;
+    expect(!ubcm::encode_node(node), "unaligned node reference rejection");
+}
+
+void test_activation_records() {
+    ubcm::ActivationRecord activation;
+    activation.procedure_position = 5;
+    activation.network_state = ubcm::RuntimeReference::at(
+        {ubcm::RegisterClass::global, 5}, 0);
+    activation.local_resolver = ubcm::RuntimeReference::at(
+        {ubcm::RegisterClass::global, 3}, 1184);
+    activation.result_register = {ubcm::RegisterClass::local, 7};
+    activation.prefix = {ubcm::PrefixKind::read, 1, false};
+
+    auto encoded = ubcm::encode_activation(activation);
+    expect(encoded && encoded->size() == ubcm::activation_bit_size,
+           "activation width");
+    expect(encoded->bytes().size() == ubcm::activation_byte_size,
+           "activation byte width");
+    expect(encoded->bytes()[0] == 0x55 && encoded->bytes()[1] == 0x41 &&
+               encoded->bytes()[2] == 0x01 && encoded->bytes()[3] == 0x00,
+           "activation header");
+    expect(ubcm::decode_activation(*encoded) == activation,
+           "activation round trip");
+
+    encoded->set(0, true);
+    expect(!ubcm::decode_activation(*encoded), "invalid activation magic rejection");
+}
+
 }  // namespace
 
 int main() {
@@ -102,6 +153,8 @@ int main() {
         {"bit_cursor", test_cursor},
         {"codecs", test_codecs},
         {"registers_and_addressing", test_registers_and_addressing},
+        {"runtime_references_and_nodes", test_runtime_references_and_nodes},
+        {"activation_records", test_activation_records},
     };
     std::size_t failed = 0;
     for (const auto& test : tests) {

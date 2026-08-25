@@ -6,6 +6,9 @@
 #include "ubcm/codec_error.hpp"
 #include "ubcm/addressing.hpp"
 #include "ubcm/registers.hpp"
+#include "ubcm/runtime_reference.hpp"
+#include "ubcm/node.hpp"
+#include "ubcm/activation.hpp"
 
 #include <string_view>
 

@@ -15,6 +15,9 @@ add_library(ubcm_vm STATIC
     src/codec.cpp
     src/registers.cpp
     src/addressing.cpp
+    src/runtime_reference.cpp
+    src/node.cpp
+    src/activation.cpp
     src/ubcm.cpp
 )
 
