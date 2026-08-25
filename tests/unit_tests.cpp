@@ -234,6 +234,33 @@ void test_vm_branch_step() {
            "failed VM step preserves network state");
 }
 
+void test_operand_resolution() {
+    ubcm::RegisterBank registers;
+    auto target = registers.create(ubcm::RegisterClass::global,
+                                   *ubcm::BitVector::from_bit_string("00000"));
+    expect(target.has_value(), "create operand target");
+    auto name = *ubcm::BitVector::from_bit_string("1");
+    ubcm::NameResolver globals;
+    expect(globals.bind(name, *target).has_value(), "bind operand target name");
+    ubcm::OperandResolver resolver(
+        registers, {ubcm::RegisterClass::procedure, 0},
+        {.global = &globals});
+
+    const ubcm::DirectReference direct{{{ubcm::RegisterClass::global, name}, 1}};
+    const ubcm::DestinationOperand destination{direct};
+    auto value = *ubcm::BitVector::from_bit_string("11");
+    expect(resolver.write_destination(destination, value).has_value(),
+           "write direct destination");
+    expect(registers.read({*target, 0}, 5)->to_bit_string() == "01100",
+           "destination suffix is zero-filled");
+
+    const ubcm::SourceOperand immediate{std::uint64_t{5}, 0, true};
+    expect(resolver.read_source_bits(immediate)->to_bit_string() == "101",
+           "immediate source uses minimal raw bits");
+    expect(resolver.read_source_uint(immediate) == 5,
+           "immediate source is an unsigned integer");
+}
+
 }  // namespace
 
 int main() {
@@ -248,6 +275,7 @@ int main() {
         {"activation_records", test_activation_records},
         {"builtin_decoder", test_builtin_decoder},
         {"vm_branch_step", test_vm_branch_step},
+        {"operand_resolution", test_operand_resolution},
     };
     std::size_t failed = 0;
     for (const auto& test : tests) {

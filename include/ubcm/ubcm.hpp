@@ -10,6 +10,7 @@
 #include "ubcm/node.hpp"
 #include "ubcm/activation.hpp"
 #include "ubcm/builtin.hpp"
+#include "ubcm/operand.hpp"
 #include "ubcm/vm.hpp"
 
 #include <string_view>
