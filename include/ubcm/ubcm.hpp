@@ -9,6 +9,8 @@
 #include "ubcm/runtime_reference.hpp"
 #include "ubcm/node.hpp"
 #include "ubcm/activation.hpp"
+#include "ubcm/builtin.hpp"
+#include "ubcm/vm.hpp"
 
 #include <string_view>
 
