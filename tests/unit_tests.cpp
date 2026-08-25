@@ -1,7 +1,9 @@
 #include "ubcm/ubcm.hpp"
 
 #include <cstdint>
+#include <array>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -74,6 +76,60 @@ void test_codecs() {
     ubcm::BitCursor malformed_cursor(*malformed);
     const auto rejected = ubcm::decode_var_uint(malformed_cursor);
     expect(!rejected && malformed_cursor.position() == 0, "non-canonical value rejection");
+}
+
+void test_arithmetic_operations() {
+    const auto binary = [](std::uint8_t operation, ubcm::Value left,
+                           ubcm::Value right) {
+        const std::array operands{left, right};
+        return ubcm::evaluate_operation(operation, operands);
+    };
+    const auto unary = [](std::uint8_t operation, ubcm::Value value) {
+        const std::array operands{value};
+        return ubcm::evaluate_operation(operation, operands);
+    };
+    expect(binary(0, std::uint64_t{5}, std::uint64_t{3}) == ubcm::Value{std::uint64_t{8}},
+           "integer addition");
+    expect(binary(1, std::uint64_t{0}, std::uint64_t{1}) ==
+               ubcm::Value{std::numeric_limits<std::uint64_t>::max()},
+           "integer subtraction wraps");
+    expect(binary(2, std::uint64_t{3}, std::uint64_t{4}) == ubcm::Value{std::uint64_t{12}},
+           "integer multiplication");
+    expect(binary(3, std::uint64_t{7}, std::uint64_t{3}) == ubcm::Value{std::uint64_t{2}},
+           "integer division");
+    expect(binary(4, std::uint64_t{7}, std::uint64_t{3}) == ubcm::Value{std::uint64_t{1}},
+           "integer remainder");
+    expect(binary(5, std::uint64_t{2}, std::uint64_t{10}) == ubcm::Value{std::uint64_t{1024}},
+           "integer power");
+    expect(binary(6, std::uint64_t{0}, std::uint64_t{1}) == ubcm::Value{std::uint64_t{0}} &&
+               binary(7, std::uint64_t{0}, std::uint64_t{1}) == ubcm::Value{std::uint64_t{1}},
+           "logical binary operations");
+    expect(binary(10, std::numeric_limits<std::uint64_t>::max(), std::uint64_t{1}) ==
+               ubcm::Value{std::uint64_t{0}},
+           "integer comparisons are signed");
+    expect(binary(14, std::uint64_t{0x0a}, std::uint64_t{0x0c}) ==
+               ubcm::Value{std::uint64_t{0x08}} &&
+               binary(15, std::uint64_t{0x0a}, std::uint64_t{0x0c}) ==
+               ubcm::Value{std::uint64_t{0x0e}},
+           "bitwise binary operations");
+    expect(unary(22, std::uint64_t{0}) == ubcm::Value{std::uint64_t{1}} &&
+               unary(23, std::uint64_t{0}) ==
+               ubcm::Value{std::numeric_limits<std::uint64_t>::max()},
+           "logical and bitwise unary operations");
+
+    const std::array<std::pair<std::uint8_t, ubcm::Value>, 14> float_operations{{
+        {16, std::uint64_t{0}}, {17, std::uint64_t{0}}, {18, std::uint64_t{0}},
+        {19, std::uint64_t{1}}, {20, std::uint64_t{0}}, {21, std::uint64_t{0}},
+        {24, std::uint64_t{0}}, {25, std::uint64_t{0}}, {26, std::uint64_t{0}},
+        {27, std::uint64_t{1}}, {28, std::uint64_t{0}}, {29, std::uint64_t{0}},
+        {30, std::uint64_t{1}}, {31, std::uint64_t{1}},
+    }};
+    for (const auto& [operation, operand] : float_operations) {
+        expect(unary(operation, operand).has_value(), "floating unary operation");
+    }
+    expect(!binary(3, std::uint64_t{1}, std::uint64_t{0}) &&
+               !unary(30, std::uint64_t{0}),
+           "mathematical domain errors are rejected");
 }
 
 void test_registers_and_addressing() {
@@ -431,6 +487,7 @@ int main() {
         {"bit_vector", test_bit_vector},
         {"bit_cursor", test_cursor},
         {"codecs", test_codecs},
+        {"arithmetic_operations", test_arithmetic_operations},
         {"registers_and_addressing", test_registers_and_addressing},
         {"runtime_references_and_nodes", test_runtime_references_and_nodes},
         {"activation_records", test_activation_records},

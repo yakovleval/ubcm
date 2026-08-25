@@ -50,6 +50,8 @@ public:
         const AddressReference& reference) const;
     [[nodiscard]] OperandResult<BitVector> read_source_bits(
         const SourceOperand& source) const;
+    [[nodiscard]] OperandResult<Value> read_source_value(
+        const SourceOperand& source) const;
     [[nodiscard]] OperandResult<std::uint64_t> read_source_uint(
         const SourceOperand& source) const;
     [[nodiscard]] OperandResult<RegisterAddress> resolve_destination(

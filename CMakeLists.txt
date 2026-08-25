@@ -18,6 +18,7 @@ add_library(ubcm_vm STATIC
     src/runtime_reference.cpp
     src/node.cpp
     src/activation.cpp
+    src/arithmetic.cpp
     src/builtin.cpp
     src/operand.cpp
     src/vm.cpp

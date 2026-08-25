@@ -158,20 +158,27 @@ OperandResult<BitVector> OperandResolver::read_source_bits(
 
 OperandResult<std::uint64_t> OperandResolver::read_source_uint(
     const SourceOperand& source) const {
+    auto value = read_source_value(source);
+    if (!value) return std::unexpected(value.error());
+    if (!std::holds_alternative<std::uint64_t>(*value)) {
+        return std::unexpected(error(OperandErrorCode::invalid_value,
+                                     "expected an unsigned integer Value"));
+    }
+    return std::get<std::uint64_t>(*value);
+}
+
+OperandResult<Value> OperandResolver::read_source_value(
+    const SourceOperand& source) const {
     auto reference = resolve_reference(source.reference);
     if (!reference) return std::unexpected(reference.error());
     if (reference->immediate) {
-        return *reference->immediate;
+        return Value{*reference->immediate};
     }
     auto bits = registers_->read(reference->address, source.bit_count);
     if (!bits) return std::unexpected(from_register_error(bits.error()));
     BitCursor cursor(*bits);
     auto value = decode_value(cursor);
     if (!value) return std::unexpected(from_codec_error(value.error()));
-    if (!std::holds_alternative<std::uint64_t>(*value)) {
-        return std::unexpected(error(OperandErrorCode::invalid_value,
-                                     "expected an unsigned integer Value"));
-    }
     while (cursor.remaining() != 0U) {
         auto padding = cursor.read_bit();
         if (!padding || *padding) {
@@ -179,7 +186,7 @@ OperandResult<std::uint64_t> OperandResolver::read_source_uint(
                                          "numeric source has non-zero trailing bits"));
         }
     }
-    return std::get<std::uint64_t>(*value);
+    return *value;
 }
 
 OperandResult<RegisterAddress> OperandResolver::resolve_destination(

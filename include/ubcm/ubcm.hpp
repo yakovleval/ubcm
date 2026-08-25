@@ -9,6 +9,7 @@
 #include "ubcm/runtime_reference.hpp"
 #include "ubcm/node.hpp"
 #include "ubcm/activation.hpp"
+#include "ubcm/arithmetic.hpp"
 #include "ubcm/builtin.hpp"
 #include "ubcm/operand.hpp"
 #include "ubcm/vm.hpp"
