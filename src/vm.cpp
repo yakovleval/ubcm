@@ -1,6 +1,8 @@
 #include "ubcm/vm.hpp"
 
+#include <optional>
 #include <utility>
+#include <vector>
 
 namespace ubcm {
 namespace {
@@ -21,6 +23,13 @@ VmError operand_error(const OperandError& source) {
     return error(source.code == OperandErrorCode::decode_error
                      ? VmErrorCode::decode_error
                      : VmErrorCode::register_access,
+                 source.message);
+}
+
+VmError arithmetic_error(const ArithmeticError& source) {
+    return error(source.code == ArithmeticErrorCode::mathematical_error
+                     ? VmErrorCode::mathematical_error
+                     : VmErrorCode::decode_error,
                  source.message);
 }
 
@@ -199,6 +208,35 @@ VmResult<StepResult> VirtualMachine::step() {
     switch (instruction->command) {
         case BuiltinCommand::branch:
             break;
+        case BuiltinCommand::compute: {
+            const auto& arguments = std::get<ComputeArguments>(instruction->arguments);
+            std::vector<Value> operands;
+            operands.reserve(arguments.sources.size());
+            for (const auto& source : arguments.sources) {
+                auto value = resolver.read_source_value(source);
+                if (!value) return std::unexpected(operand_error(value.error()));
+                operands.push_back(std::move(*value));
+            }
+            auto result = evaluate_operation(arguments.operation, operands);
+            if (!result) return std::unexpected(arithmetic_error(result.error()));
+            auto value = encode_value(*result);
+            if (!value) return std::unexpected(codec_error(value.error()));
+            auto address = resolver.resolve_destination(arguments.destination);
+            if (!address) return std::unexpected(operand_error(address.error()));
+            auto size = registers_->size(address->handle);
+            if (!size) return std::unexpected(register_error(size.error()));
+            if (address->bit_offset > *size) {
+                return std::unexpected(error(VmErrorCode::register_access,
+                                             "destination offset is out of range"));
+            }
+            if (auto valid = resolver.validate_destination(*address, value->size()); !valid) {
+                return std::unexpected(operand_error(valid.error()));
+            }
+            BitVector stored = *value;
+            stored.resize(*size - address->bit_offset);
+            data_write = PreparedWrite{*address, std::move(stored)};
+            break;
+        }
         case BuiltinCommand::copy: {
             const auto& arguments = std::get<CopyArguments>(instruction->arguments);
             auto value = resolver.read_source_bits(arguments.source);

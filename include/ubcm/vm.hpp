@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ubcm/activation.hpp"
+#include "ubcm/arithmetic.hpp"
 #include "ubcm/builtin.hpp"
 #include "ubcm/operand.hpp"
 
@@ -14,6 +15,7 @@ enum class VmErrorCode {
     invalid_state,
     register_access,
     decode_error,
+    mathematical_error,
     unsupported_command,
 };
 

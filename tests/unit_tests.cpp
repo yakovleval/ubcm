@@ -112,6 +112,10 @@ void test_arithmetic_operations() {
                binary(15, std::uint64_t{0x0a}, std::uint64_t{0x0c}) ==
                ubcm::Value{std::uint64_t{0x0e}},
            "bitwise binary operations");
+    expect(binary(0, ubcm::VariableFloat{3, -1}, std::uint64_t{1}) ==
+               ubcm::Value{ubcm::VariableFloat{5, -1}} &&
+               !binary(14, ubcm::VariableFloat{1, 0}, std::uint64_t{1}),
+           "floating arithmetic and integer-only bitwise validation");
     expect(unary(22, std::uint64_t{0}) == ubcm::Value{std::uint64_t{1}} &&
                unary(23, std::uint64_t{0}) ==
                ubcm::Value{std::numeric_limits<std::uint64_t>::max()},
@@ -478,6 +482,75 @@ void test_vm_core_builtin_effects() {
     }
 }
 
+ubcm::BitVector encode_compute_program(std::uint8_t operation,
+                                       const ubcm::SourceOperand& first,
+                                       const ubcm::SourceOperand& second,
+                                       const ubcm::DestinationOperand& destination) {
+    ubcm::BitVector program;
+    for (int shift = 4; shift >= 0; --shift) {
+        program.push_back(((operation >> shift) & 1U) != 0U);
+    }
+    program.append(ubcm::encode_source(first));
+    program.append(ubcm::encode_source(second));
+    program.append(ubcm::encode_destination(destination));
+    program.push_back(true);
+    return program;
+}
+
+void test_vm_compute_builtin() {
+    ubcm::RegisterBank registers;
+    ubcm::NameResolver globals;
+    auto output_name = *ubcm::BitVector::from_bit_string("1");
+    auto output = registers.create(ubcm::RegisterClass::global, ubcm::BitVector(32));
+    expect(output && globals.bind(output_name, *output), "bind compute output");
+    const ubcm::SourceOperand five{std::uint64_t{5}, 0, true};
+    const ubcm::SourceOperand three{std::uint64_t{3}, 0, true};
+    const ubcm::DestinationOperand destination{ubcm::DirectReference{
+        {{ubcm::RegisterClass::global, output_name}, 0}}};
+    auto program = encode_compute_program(0, five, three, destination);
+    auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+    const auto node_storage = install_branching_nodes(registers, ubcm::BuiltinCommand::compute);
+    ubcm::ActivationRecord activation;
+    activation.procedure = *procedure;
+    activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+    ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+    auto step = vm.step();
+    expect(step && vm.current_activation().procedure_position == program.size(),
+           "execute compute builtin");
+    auto stored = registers.read({*output, 0}, 32);
+    ubcm::BitCursor cursor(*stored);
+    auto value = ubcm::decode_value(cursor);
+    expect(value && *value == ubcm::Value{std::uint64_t{8}},
+           "compute writes canonical integer Value");
+
+    ubcm::RegisterBank failing_registers;
+    ubcm::NameResolver failing_globals;
+    auto failing_output = failing_registers.create(ubcm::RegisterClass::global,
+                                                   ubcm::BitVector(32));
+    expect(failing_output && failing_globals.bind(output_name, *failing_output),
+           "bind failing compute output");
+    auto failing_program = encode_compute_program(3, five,
+                                                  ubcm::SourceOperand{std::uint64_t{0}, 0, true},
+                                                  destination);
+    auto failing_procedure = failing_registers.create(ubcm::RegisterClass::procedure,
+                                                       failing_program, true);
+    const auto failing_nodes = install_branching_nodes(
+        failing_registers, ubcm::BuiltinCommand::compute);
+    ubcm::ActivationRecord failing_activation;
+    failing_activation.procedure = *failing_procedure;
+    failing_activation.network_state = ubcm::RuntimeReference::at(failing_nodes.state, 0);
+    ubcm::VirtualMachine failing_vm(failing_registers, failing_activation,
+                                    {.global = &failing_globals});
+    expect(!failing_vm.step() && failing_vm.current_activation().procedure_position == 0,
+           "mathematical failure preserves VM cursor");
+    auto state = failing_registers.read({failing_nodes.state, 0},
+                                        ubcm::runtime_reference_bit_size);
+    ubcm::BitCursor state_cursor(*state);
+    expect(ubcm::decode_runtime_reference(state_cursor) ==
+               ubcm::RuntimeReference::at(failing_nodes.nodes, 0),
+           "mathematical failure preserves network state");
+}
+
 }  // namespace
 
 int main() {
@@ -495,6 +568,7 @@ int main() {
         {"vm_branch_step", test_vm_branch_step},
         {"operand_resolution", test_operand_resolution},
         {"vm_core_builtin_effects", test_vm_core_builtin_effects},
+        {"vm_compute_builtin", test_vm_compute_builtin},
     };
     std::size_t failed = 0;
     for (const auto& test : tests) {
