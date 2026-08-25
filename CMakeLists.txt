@@ -13,6 +13,8 @@ add_library(ubcm_vm STATIC
     src/bit_vector.cpp
     src/bit_cursor.cpp
     src/codec.cpp
+    src/registers.cpp
+    src/addressing.cpp
     src/ubcm.cpp
 )
 
@@ -37,11 +39,11 @@ add_executable(ubcm
 target_link_libraries(ubcm PRIVATE ubcm::vm)
 
 if(BUILD_TESTING)
-    add_executable(ubcm_tests
-        tests/smoke.cpp
+    add_executable(ubcm_unit_tests
+        tests/unit_tests.cpp
     )
 
-    target_link_libraries(ubcm_tests PRIVATE ubcm::vm)
+    target_link_libraries(ubcm_unit_tests PRIVATE ubcm::vm)
 
-    add_test(NAME ubcm.smoke COMMAND ubcm_tests)
+    add_test(NAME ubcm.unit COMMAND ubcm_unit_tests)
 endif()

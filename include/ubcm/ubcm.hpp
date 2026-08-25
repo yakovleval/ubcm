@@ -4,6 +4,8 @@
 #include "ubcm/bit_vector.hpp"
 #include "ubcm/codec.hpp"
 #include "ubcm/codec_error.hpp"
+#include "ubcm/addressing.hpp"
+#include "ubcm/registers.hpp"
 
 #include <string_view>
 
