@@ -113,8 +113,20 @@ void test_arithmetic_operations() {
     expect(binary(6, std::uint64_t{0}, std::uint64_t{1}) == ubcm::Value{std::uint64_t{0}} &&
                binary(7, std::uint64_t{0}, std::uint64_t{1}) == ubcm::Value{std::uint64_t{1}},
            "logical binary operations");
-    expect(binary(10, std::numeric_limits<std::uint64_t>::max(), std::uint64_t{1}) ==
+    expect(binary(8, std::uint64_t{1}, std::uint64_t{1}) ==
+               ubcm::Value{std::uint64_t{1}} &&
+               binary(9, std::uint64_t{1}, std::uint64_t{1}) ==
                ubcm::Value{std::uint64_t{0}},
+           "integer equality operations");
+    const auto negative_one = std::numeric_limits<std::uint64_t>::max();
+    expect(binary(10, negative_one, std::uint64_t{1}) ==
+               ubcm::Value{std::uint64_t{0}} &&
+               binary(11, negative_one, std::uint64_t{1}) ==
+               ubcm::Value{std::uint64_t{0}} &&
+               binary(12, negative_one, std::uint64_t{1}) ==
+               ubcm::Value{std::uint64_t{1}} &&
+               binary(13, negative_one, negative_one) ==
+               ubcm::Value{std::uint64_t{1}},
            "integer comparisons are signed");
     expect(binary(14, std::uint64_t{0x0a}, std::uint64_t{0x0c}) ==
                ubcm::Value{std::uint64_t{0x08}} &&
@@ -240,11 +252,23 @@ void test_builtin_decoder() {
                static_cast<std::uint8_t>(ubcm::BuiltinCommand::compute),
                truncated_cursor) && truncated_cursor.position() == 0,
            "failed builtin decoding is transactional");
+
+    auto finish_bits = *ubcm::BitVector::from_bit_string("1");
+    ubcm::BitCursor finish_cursor(finish_bits);
+    auto finish = ubcm::decode_builtin(
+        static_cast<std::uint8_t>(ubcm::BuiltinCommand::finish_call), finish_cursor);
+    expect(finish && !finish->branch && finish_cursor.position() == 0,
+           "finish-call has no branch bit");
+
+    ubcm::BitCursor reserved_cursor(finish_bits);
+    expect(!ubcm::decode_builtin(0x0e, reserved_cursor) &&
+               reserved_cursor.position() == 0,
+           "reserved builtin command rejection");
 }
 
 void test_vm_branch_step() {
     ubcm::RegisterBank registers;
-    auto procedure_bits = *ubcm::BitVector::from_bit_string("1");
+    auto procedure_bits = *ubcm::BitVector::from_bit_string("10");
     auto procedure = registers.create(ubcm::RegisterClass::procedure,
                                       procedure_bits, true);
     expect(procedure.has_value(), "create VM procedure");
@@ -263,14 +287,18 @@ void test_vm_branch_step() {
 
     const auto second_reference = ubcm::RuntimeReference::at(*nodes,
                                                               ubcm::node_bit_size);
+    const auto first_reference = ubcm::RuntimeReference::at(*nodes, 0);
     first.next1 = second_reference;
+    second.next0 = first_reference;
     first_bits = ubcm::encode_node(first);
-    expect(first_bits.has_value(), "encode linked VM node");
-    expect(registers.write({*nodes, 0}, *first_bits).has_value(),
-           "write linked VM node");
+    second_bits = ubcm::encode_node(second);
+    expect(first_bits && second_bits, "encode linked VM nodes");
+    expect(registers.write({*nodes, 0}, *first_bits).has_value() &&
+               registers.write({*nodes, ubcm::node_bit_size}, *second_bits).has_value(),
+           "write linked VM nodes");
 
     auto initial_reference = ubcm::encode_runtime_reference(
-        ubcm::RuntimeReference::at(*nodes, 0));
+        first_reference);
     expect(initial_reference.has_value(), "encode initial node reference");
     auto network_state = registers.create(ubcm::RegisterClass::global,
                                           *initial_reference);
@@ -293,13 +321,24 @@ void test_vm_branch_step() {
     expect(ubcm::decode_runtime_reference(stored_cursor) == second_reference,
            "VM commits network transition");
 
+    auto second_step = vm.step();
+    expect(second_step && !second_step->branch && second_step->next_node == first_reference &&
+               vm.current_activation().procedure_position == 2,
+           "VM selects next0");
+
+    auto returned = registers.read({*network_state, 0},
+                                   ubcm::runtime_reference_bit_size);
+    ubcm::BitCursor returned_cursor(*returned);
+    expect(ubcm::decode_runtime_reference(returned_cursor) == first_reference,
+           "VM commits next0 transition");
+
     auto failed_step = vm.step();
-    expect(!failed_step && vm.current_activation().procedure_position == 1,
+    expect(!failed_step && vm.current_activation().procedure_position == 2,
            "failed VM step preserves procedure position");
     auto unchanged = registers.read({*network_state, 0},
                                     ubcm::runtime_reference_bit_size);
     ubcm::BitCursor unchanged_cursor(*unchanged);
-    expect(ubcm::decode_runtime_reference(unchanged_cursor) == second_reference,
+    expect(ubcm::decode_runtime_reference(unchanged_cursor) == first_reference,
            "failed VM step preserves network state");
 }
 
@@ -362,6 +401,16 @@ VmNodeStorage install_branching_nodes(ubcm::RegisterBank& registers,
     auto state = registers.create(ubcm::RegisterClass::global, *state_bits);
     expect(state.has_value(), "create builtin state");
     return {*nodes, *state, next};
+}
+
+ubcm::NodeReference stored_node_reference(ubcm::RegisterBank& registers,
+                                          ubcm::RegisterHandle state) {
+    auto bits = registers.read({state, 0}, ubcm::runtime_reference_bit_size);
+    expect(bits.has_value(), "read network state reference");
+    ubcm::BitCursor cursor(*bits);
+    auto reference = ubcm::decode_runtime_reference(cursor);
+    expect(reference.has_value(), "decode network state reference");
+    return *reference;
 }
 
 void test_vm_core_builtin_effects() {
@@ -436,6 +485,24 @@ void test_vm_core_builtin_effects() {
 
     {
         ubcm::RegisterBank registers;
+        const ubcm::SourceOperand source{std::uint64_t{1000}, 0, true};
+        auto program = ubcm::encode_source(source);
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::set_procedure_position);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation);
+        expect(!vm.step() && vm.current_activation().procedure_position == 0 &&
+                   stored_node_reference(registers, node_storage.state) ==
+                       ubcm::RuntimeReference::at(node_storage.nodes, 0),
+               "invalid position preserves VM state");
+    }
+
+    {
+        ubcm::RegisterBank registers;
         ubcm::NameResolver globals;
         auto target_name = *ubcm::BitVector::from_bit_string("10");
         auto target = registers.create(ubcm::RegisterClass::global,
@@ -455,6 +522,30 @@ void test_vm_core_builtin_effects() {
         ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
         expect(vm.step().has_value() && registers.size(*target) == 7,
                "resize builtin changes register size");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::resize_register);
+        auto nodes_name = *ubcm::BitVector::from_bit_string("10");
+        expect(globals.bind(nodes_name, node_storage.nodes).has_value(),
+               "bind active node register");
+        const ubcm::RegisterSelector selector{ubcm::RegisterClass::global, nodes_name};
+        const ubcm::SourceOperand size{std::uint64_t{0}, 0, true};
+        auto program = ubcm::encode_register_selector(selector);
+        program.append(ubcm::encode_source(size));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        expect(!vm.step() && registers.size(node_storage.nodes) == 2 * ubcm::node_bit_size &&
+                   stored_node_reference(registers, node_storage.state) ==
+                       ubcm::RuntimeReference::at(node_storage.nodes, 0),
+               "resize cannot delete active node storage");
     }
 
     {
@@ -489,6 +580,37 @@ void test_vm_core_builtin_effects() {
                    std::get<std::uint64_t>(*value) == 5,
                "get-size writes canonical Value");
     }
+
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        auto source_name = *ubcm::BitVector::from_bit_string("10");
+        auto destination_name = *ubcm::BitVector::from_bit_string("11");
+        auto source = registers.create(ubcm::RegisterClass::global,
+                                       *ubcm::BitVector::from_bit_string("10101"));
+        auto destination = registers.create(
+            ubcm::RegisterClass::global, *ubcm::BitVector::from_bit_string("1"));
+        expect(source && destination && globals.bind(source_name, *source) &&
+                   globals.bind(destination_name, *destination),
+               "bind short get-size destination");
+        const ubcm::RegisterSelector selector{ubcm::RegisterClass::global, source_name};
+        const ubcm::DestinationOperand output{ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, destination_name}, 0}}};
+        auto program = ubcm::encode_register_selector(selector);
+        program.append(ubcm::encode_destination(output));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::get_register_size);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        expect(!vm.step() && registers.read({*destination, 0}, 1)->to_bit_string() == "1" &&
+                   stored_node_reference(registers, node_storage.state) ==
+                       ubcm::RuntimeReference::at(node_storage.nodes, 0),
+               "failed get-size preserves destination and VM state");
+    }
 }
 
 ubcm::BitVector encode_compute_program(std::uint8_t operation,
@@ -497,10 +619,27 @@ ubcm::BitVector encode_compute_program(std::uint8_t operation,
                                        const ubcm::DestinationOperand& destination) {
     ubcm::BitVector program;
     for (int shift = 4; shift >= 0; --shift) {
-        program.push_back(((operation >> shift) & 1U) != 0U);
+        program.push_back(((static_cast<unsigned int>(operation) >>
+                            static_cast<unsigned int>(shift)) &
+                           1U) != 0U);
     }
     program.append(ubcm::encode_source(first));
     program.append(ubcm::encode_source(second));
+    program.append(ubcm::encode_destination(destination));
+    program.push_back(true);
+    return program;
+}
+
+ubcm::BitVector encode_unary_compute_program(
+    std::uint8_t operation, const ubcm::SourceOperand& source,
+    const ubcm::DestinationOperand& destination) {
+    ubcm::BitVector program;
+    for (int shift = 4; shift >= 0; --shift) {
+        program.push_back(((static_cast<unsigned int>(operation) >>
+                            static_cast<unsigned int>(shift)) &
+                           1U) != 0U);
+    }
+    program.append(ubcm::encode_source(source));
     program.append(ubcm::encode_destination(destination));
     program.push_back(true);
     return program;
@@ -531,6 +670,32 @@ void test_vm_compute_builtin() {
     auto value = ubcm::decode_value(cursor);
     expect(value && *value == ubcm::Value{std::uint64_t{8}},
            "compute writes canonical integer Value");
+    while (cursor.remaining() != 0U) {
+        expect(!*cursor.read_bit(), "compute zero-fills destination suffix");
+    }
+
+    ubcm::RegisterBank unary_registers;
+    ubcm::NameResolver unary_globals;
+    auto unary_output = unary_registers.create(ubcm::RegisterClass::global,
+                                                ubcm::BitVector(32));
+    expect(unary_output && unary_globals.bind(output_name, *unary_output),
+           "bind unary compute output");
+    auto unary_program = encode_unary_compute_program(
+        22, ubcm::SourceOperand{std::uint64_t{0}, 0, true}, destination);
+    auto unary_procedure = unary_registers.create(ubcm::RegisterClass::procedure,
+                                                   unary_program, true);
+    const auto unary_nodes = install_branching_nodes(
+        unary_registers, ubcm::BuiltinCommand::compute);
+    ubcm::ActivationRecord unary_activation;
+    unary_activation.procedure = *unary_procedure;
+    unary_activation.network_state = ubcm::RuntimeReference::at(unary_nodes.state, 0);
+    ubcm::VirtualMachine unary_vm(unary_registers, unary_activation,
+                                  {.global = &unary_globals});
+    expect(unary_vm.step().has_value(), "execute unary compute builtin");
+    auto unary_stored = unary_registers.read({*unary_output, 0}, 32);
+    ubcm::BitCursor unary_cursor(*unary_stored);
+    expect(ubcm::decode_value(unary_cursor) == ubcm::Value{std::uint64_t{1}},
+           "unary compute writes logical result");
 
     ubcm::RegisterBank failing_registers;
     ubcm::NameResolver failing_globals;

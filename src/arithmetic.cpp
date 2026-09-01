@@ -1,5 +1,6 @@
 #include "ubcm/arithmetic.hpp"
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -17,6 +18,10 @@ bool is_integer(const Value& value) {
 
 std::uint64_t as_integer(const Value& value) {
     return std::get<std::uint64_t>(value);
+}
+
+std::int64_t as_signed_integer(const Value& value) {
+    return std::bit_cast<std::int64_t>(as_integer(value));
 }
 
 double as_double(const Value& value) {
@@ -231,23 +236,23 @@ ArithmeticResult<Value> evaluate_operation(std::uint8_t operation,
                        : boolean_result(left != right);
         case 10:
             return both_integer
-                       ? boolean_result(static_cast<std::int64_t>(as_integer(operands[0])) >
-                                        static_cast<std::int64_t>(as_integer(operands[1])))
+                       ? boolean_result(as_signed_integer(operands[0]) >
+                                        as_signed_integer(operands[1]))
                        : boolean_result(left > right);
         case 11:
             return both_integer
-                       ? boolean_result(static_cast<std::int64_t>(as_integer(operands[0])) >=
-                                        static_cast<std::int64_t>(as_integer(operands[1])))
+                       ? boolean_result(as_signed_integer(operands[0]) >=
+                                        as_signed_integer(operands[1]))
                        : boolean_result(left >= right);
         case 12:
             return both_integer
-                       ? boolean_result(static_cast<std::int64_t>(as_integer(operands[0])) <
-                                        static_cast<std::int64_t>(as_integer(operands[1])))
+                       ? boolean_result(as_signed_integer(operands[0]) <
+                                        as_signed_integer(operands[1]))
                        : boolean_result(left < right);
         case 13:
             return both_integer
-                       ? boolean_result(static_cast<std::int64_t>(as_integer(operands[0])) <=
-                                        static_cast<std::int64_t>(as_integer(operands[1])))
+                       ? boolean_result(as_signed_integer(operands[0]) <=
+                                        as_signed_integer(operands[1]))
                        : boolean_result(left <= right);
         case 14:
             if (!both_integer) {
