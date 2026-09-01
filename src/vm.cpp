@@ -70,7 +70,7 @@ const ActivationFrame& VirtualMachine::current_frame() const noexcept {
 }
 
 VmResult<std::size_t> VirtualMachine::activation_index(std::uint64_t depth) const {
-    if (depth >= activations_.size()) {
+    if (depth >= static_cast<std::uint64_t>(activations_.size())) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "activation depth is out of range"));
     }
@@ -227,14 +227,26 @@ VmResult<StepResult> VirtualMachine::step() {
 }
 
 VmResult<StepResult> VirtualMachine::step_impl() {
-    auto& frame = current_frame();
-    auto& activation = frame.activation;
-    if (activation.prefix.kind != PrefixKind::none) {
-        return std::unexpected(error(VmErrorCode::unsupported_command,
-                                     "prefix execution belongs to the next VM stage"));
+    const auto owner_index = activations_.size() - 1U;
+    const auto active_prefix = current_activation().prefix;
+    auto read_index = owner_index;
+    auto modify_index = owner_index;
+    if (active_prefix.kind == PrefixKind::read) {
+        auto index = activation_index(active_prefix.depth);
+        if (!index) return std::unexpected(index.error());
+        read_index = *index;
+    } else if (active_prefix.kind == PrefixKind::modify) {
+        auto index = activation_index(active_prefix.depth);
+        if (!index) return std::unexpected(index.error());
+        modify_index = *index;
     }
 
-    auto current_reference = read_network_state(activation);
+    auto& owner_activation = activations_[owner_index].activation;
+    auto& read_frame = activations_[read_index];
+    auto& modify_frame = activations_[modify_index];
+    auto& modify_activation = modify_frame.activation;
+
+    auto current_reference = read_network_state(owner_activation);
     if (!current_reference) {
         return std::unexpected(current_reference.error());
     }
@@ -247,18 +259,26 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                                      "procedure calls belong to the next VM stage"));
     }
 
-    auto procedure = registers_->view(activation.procedure);
+    auto procedure = registers_->view(read_frame.activation.procedure);
     if (!procedure) {
         return std::unexpected(register_error(procedure.error()));
     }
-    if (activation.procedure_position > (*procedure)->size()) {
+    if (read_frame.activation.procedure_position > (*procedure)->size()) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "procedure position is out of range"));
     }
-    BitCursor cursor(**procedure, activation.procedure_position);
+    BitCursor cursor(**procedure, read_frame.activation.procedure_position);
     auto instruction = decode_builtin(node->command, cursor);
     if (!instruction) {
         return std::unexpected(codec_error(instruction.error()));
+    }
+    const auto is_prefix_command =
+        instruction->command == BuiltinCommand::read_prefix ||
+        instruction->command == BuiltinCommand::modify_prefix ||
+        instruction->command == BuiltinCommand::condition_prefix;
+    if (active_prefix.kind != PrefixKind::none && is_prefix_command) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "cannot combine active prefixes"));
     }
     if (!instruction->branch) {
         return std::unexpected(error(VmErrorCode::unsupported_command,
@@ -268,7 +288,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     if (auto valid = validate_node_target(next); !valid) {
         return std::unexpected(valid.error());
     }
-    if (auto valid = validate_network_state_write(activation); !valid) {
+    if (auto valid = validate_network_state_write(modify_activation); !valid) {
         return std::unexpected(valid.error());
     }
     auto encoded_next = encode_runtime_reference(next);
@@ -276,13 +296,20 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         return std::unexpected(codec_error(encoded_next.error()));
     }
 
-    const auto resolver = operand_resolver(frame);
+    const auto read_resolver = operand_resolver(read_frame);
+    const auto modify_resolver = operand_resolver(modify_frame);
+    auto modified_procedure = registers_->view(modify_activation.procedure);
+    if (!modified_procedure) {
+        return std::unexpected(register_error(modified_procedure.error()));
+    }
     std::optional<PreparedWrite> data_write;
     std::optional<std::pair<RegisterHandle, std::uint64_t>> resize;
     std::optional<PrefixState> next_prefix;
     auto next_position = instruction->next_procedure_position;
+    const auto suppress_effect = active_prefix.kind == PrefixKind::condition &&
+                                 !active_prefix.condition;
 
-    switch (instruction->command) {
+    if (!suppress_effect) switch (instruction->command) {
         case BuiltinCommand::read_prefix:
         case BuiltinCommand::modify_prefix: {
             const auto& arguments = std::get<DepthArguments>(instruction->arguments);
@@ -297,7 +324,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         }
         case BuiltinCommand::condition_prefix: {
             const auto& arguments = std::get<ConditionArguments>(instruction->arguments);
-            auto address = resolver.resolve_destination(arguments.condition);
+            auto address = read_resolver.resolve_destination(arguments.condition);
             if (!address) return std::unexpected(operand_error(address.error()));
             auto condition = registers_->read(*address, 1);
             if (!condition) return std::unexpected(register_error(condition.error()));
@@ -311,7 +338,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
             std::vector<Value> operands;
             operands.reserve(arguments.sources.size());
             for (const auto& source : arguments.sources) {
-                auto value = resolver.read_source_value(source);
+                auto value = read_resolver.read_source_value(source);
                 if (!value) return std::unexpected(operand_error(value.error()));
                 operands.push_back(std::move(*value));
             }
@@ -319,7 +346,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
             if (!result) return std::unexpected(arithmetic_error(result.error()));
             auto value = encode_value(*result);
             if (!value) return std::unexpected(codec_error(value.error()));
-            auto address = resolver.resolve_destination(arguments.destination);
+            auto address = modify_resolver.resolve_destination(arguments.destination);
             if (!address) return std::unexpected(operand_error(address.error()));
             auto size = registers_->size(address->handle);
             if (!size) return std::unexpected(register_error(size.error()));
@@ -327,7 +354,8 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                 return std::unexpected(error(VmErrorCode::register_access,
                                              "destination offset is out of range"));
             }
-            if (auto valid = resolver.validate_destination(*address, value->size()); !valid) {
+            if (auto valid = modify_resolver.validate_destination(*address, value->size());
+                !valid) {
                 return std::unexpected(operand_error(valid.error()));
             }
             BitVector stored = *value;
@@ -337,9 +365,9 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         }
         case BuiltinCommand::copy: {
             const auto& arguments = std::get<CopyArguments>(instruction->arguments);
-            auto value = resolver.read_source_bits(arguments.source);
+            auto value = read_resolver.read_source_bits(arguments.source);
             if (!value) return std::unexpected(operand_error(value.error()));
-            auto address = resolver.resolve_destination(arguments.destination);
+            auto address = modify_resolver.resolve_destination(arguments.destination);
             if (!address) return std::unexpected(operand_error(address.error()));
             auto size = registers_->size(address->handle);
             if (!size) return std::unexpected(register_error(size.error()));
@@ -347,7 +375,8 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                 return std::unexpected(error(VmErrorCode::register_access,
                                              "destination offset is out of range"));
             }
-            if (auto valid = resolver.validate_destination(*address, value->size()); !valid) {
+            if (auto valid = modify_resolver.validate_destination(*address, value->size());
+                !valid) {
                 return std::unexpected(operand_error(valid.error()));
             }
             BitVector stored = *value;
@@ -357,9 +386,9 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         }
         case BuiltinCommand::set_procedure_position: {
             const auto& arguments = std::get<OneSourceArguments>(instruction->arguments);
-            auto position = resolver.read_source_uint(arguments.source);
+            auto position = read_resolver.read_source_uint(arguments.source);
             if (!position) return std::unexpected(operand_error(position.error()));
-            if (*position > (*procedure)->size()) {
+            if (*position > (*modified_procedure)->size()) {
                 return std::unexpected(error(VmErrorCode::invalid_state,
                                              "new procedure position is out of range"));
             }
@@ -368,9 +397,9 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         }
         case BuiltinCommand::resize_register: {
             const auto& arguments = std::get<ResizeArguments>(instruction->arguments);
-            auto address = resolver.resolve_address({arguments.selector, 0});
+            auto address = modify_resolver.resolve_address({arguments.selector, 0});
             if (!address) return std::unexpected(operand_error(address.error()));
-            auto size = resolver.read_source_uint(arguments.size);
+            auto size = read_resolver.read_source_uint(arguments.size);
             if (!size) return std::unexpected(operand_error(size.error()));
             if (auto valid = validate_resize_target(address->handle, *size,
                                                     *current_reference, next);
@@ -382,13 +411,13 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         }
         case BuiltinCommand::get_register_size: {
             const auto& arguments = std::get<GetSizeArguments>(instruction->arguments);
-            auto address = resolver.resolve_address({arguments.selector, 0});
+            auto address = read_resolver.resolve_address({arguments.selector, 0});
             if (!address) return std::unexpected(operand_error(address.error()));
             auto register_size = registers_->size(address->handle);
             if (!register_size) return std::unexpected(register_error(register_size.error()));
             auto value = encode_value(*register_size);
             if (!value) return std::unexpected(codec_error(value.error()));
-            auto destination = resolver.resolve_destination(arguments.destination);
+            auto destination = modify_resolver.resolve_destination(arguments.destination);
             if (!destination) return std::unexpected(operand_error(destination.error()));
             auto destination_size = registers_->size(destination->handle);
             if (!destination_size) {
@@ -398,7 +427,9 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                 return std::unexpected(error(VmErrorCode::register_access,
                                              "destination offset is out of range"));
             }
-            if (auto valid = resolver.validate_destination(*destination, value->size()); !valid) {
+            if (auto valid = modify_resolver.validate_destination(
+                    *destination, value->size());
+                !valid) {
                 return std::unexpected(operand_error(valid.error()));
             }
             BitVector stored = *value;
@@ -411,6 +442,11 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                                          "builtin effect belongs to a later VM stage"));
     }
 
+    if (next_position > (*modified_procedure)->size()) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "new procedure position is out of range"));
+    }
+
     if (data_write) {
         auto written = registers_->write(data_write->address, data_write->bits);
         if (!written) return std::unexpected(register_error(written.error()));
@@ -421,17 +457,20 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     }
 
     auto written = registers_->write(
-        {activation.network_state.handle, activation.network_state.bit_offset},
+        {modify_activation.network_state.handle,
+         modify_activation.network_state.bit_offset},
         *encoded_next);
     if (!written) {
         return std::unexpected(register_error(written.error()));
     }
-    activation.procedure_position = next_position;
+    modify_activation.procedure_position = next_position;
     if (next_prefix) {
-        activation.prefix = *next_prefix;
+        owner_activation.prefix = *next_prefix;
+    } else if (active_prefix.kind != PrefixKind::none) {
+        owner_activation.prefix = {};
     }
     return StepResult{instruction->command, *instruction->branch, next,
-                      activation.procedure_position};
+                      modify_activation.procedure_position};
 }
 
 }  // namespace ubcm
