@@ -372,6 +372,31 @@ void test_vm_branch_step() {
            "failed VM step preserves network state");
 }
 
+void test_vm_activation_stack() {
+    ubcm::RegisterBank registers;
+    ubcm::ActivationRecord root;
+    root.procedure_position = 3;
+    ubcm::ActivationRecord current;
+    current.procedure_position = 7;
+    std::vector<ubcm::ActivationFrame> activations{
+        {root, {}},
+        {current, {}},
+    };
+    ubcm::VirtualMachine vm(registers, std::move(activations));
+    expect(vm.activation_count() == 2 &&
+               vm.current_activation().procedure_position == 7,
+           "VM exposes the top activation");
+
+    bool rejected_empty_stack = false;
+    try {
+        ubcm::VirtualMachine invalid_vm(
+            registers, std::vector<ubcm::ActivationFrame>{});
+    } catch (const std::invalid_argument&) {
+        rejected_empty_stack = true;
+    }
+    expect(rejected_empty_stack, "VM rejects an empty activation stack");
+}
+
 void test_operand_resolution() {
     ubcm::RegisterBank registers;
     auto target = registers.create(ubcm::RegisterClass::global,
@@ -782,6 +807,7 @@ int main() {
         {"activation_records", test_activation_records},
         {"builtin_decoder", test_builtin_decoder},
         {"vm_branch_step", test_vm_branch_step},
+        {"vm_activation_stack", test_vm_activation_stack},
         {"operand_resolution", test_operand_resolution},
         {"vm_core_builtin_effects", test_vm_core_builtin_effects},
         {"vm_compute_builtin", test_vm_compute_builtin},

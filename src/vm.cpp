@@ -50,19 +50,41 @@ struct PreparedWrite {
 
 VirtualMachine::VirtualMachine(RegisterBank& registers, ActivationRecord activation,
                                OperandResolvers resolvers)
-    : registers_(&registers), activation_(std::move(activation)), resolvers_(resolvers) {}
+    : VirtualMachine(registers,
+                     std::vector<ActivationFrame>{{std::move(activation), resolvers}}) {}
 
-const ActivationRecord& VirtualMachine::current_activation() const noexcept {
-    return activation_;
+VirtualMachine::VirtualMachine(RegisterBank& registers,
+                               std::vector<ActivationFrame> activations)
+    : registers_(&registers), activations_(std::move(activations)) {
+    if (activations_.empty()) {
+        throw std::invalid_argument("VM requires at least one activation");
+    }
 }
 
-VmResult<NodeReference> VirtualMachine::read_network_state() const {
-    if (activation_.network_state.null) {
+ActivationFrame& VirtualMachine::current_frame() noexcept {
+    return activations_.back();
+}
+
+const ActivationFrame& VirtualMachine::current_frame() const noexcept {
+    return activations_.back();
+}
+
+const ActivationRecord& VirtualMachine::current_activation() const noexcept {
+    return current_frame().activation;
+}
+
+std::size_t VirtualMachine::activation_count() const noexcept {
+    return activations_.size();
+}
+
+VmResult<NodeReference> VirtualMachine::read_network_state(
+    const ActivationRecord& activation) const {
+    if (activation.network_state.null) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "activation has no network state"));
     }
     auto bits = registers_->read(
-        {activation_.network_state.handle, activation_.network_state.bit_offset},
+        {activation.network_state.handle, activation.network_state.bit_offset},
         runtime_reference_bit_size);
     if (!bits) {
         return std::unexpected(register_error(bits.error()));
@@ -104,21 +126,22 @@ VmResult<void> VirtualMachine::validate_node_target(
     return {};
 }
 
-VmResult<void> VirtualMachine::validate_network_state_write() const {
-    if (activation_.network_state.null) {
+VmResult<void> VirtualMachine::validate_network_state_write(
+    const ActivationRecord& activation) const {
+    if (activation.network_state.null) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "activation has no writable network state"));
     }
-    auto immutable = registers_->is_immutable(activation_.network_state.handle);
+    auto immutable = registers_->is_immutable(activation.network_state.handle);
     if (!immutable) return std::unexpected(register_error(immutable.error()));
     if (*immutable) {
         return std::unexpected(error(VmErrorCode::register_access,
                                      "network state register is immutable"));
     }
-    auto size = registers_->size(activation_.network_state.handle);
+    auto size = registers_->size(activation.network_state.handle);
     if (!size) return std::unexpected(register_error(size.error()));
-    if (activation_.network_state.bit_offset > *size ||
-        runtime_reference_bit_size > *size - activation_.network_state.bit_offset) {
+    if (activation.network_state.bit_offset > *size ||
+        runtime_reference_bit_size > *size - activation.network_state.bit_offset) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "network state cell is out of range"));
     }
@@ -135,29 +158,49 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
         return std::unexpected(error(VmErrorCode::register_access,
                                      "register is immutable"));
     }
-    if (bit_size == 0U &&
-        (handle == activation_.procedure || handle == activation_.network_state.handle ||
-         handle == current.handle || handle == activation_.result_register ||
-         (!activation_.local_resolver.null && handle == activation_.local_resolver.handle))) {
-        return std::unexpected(error(VmErrorCode::invalid_state,
-                                     "cannot delete a register used by the active VM state"));
-    }
     const auto fits = [handle, bit_size](const RuntimeReference& reference,
                                          std::uint64_t required_size) {
         return reference.null || handle != reference.handle ||
                (reference.bit_offset <= bit_size &&
                 required_size <= bit_size - reference.bit_offset);
     };
-    if (!fits(activation_.network_state, runtime_reference_bit_size) ||
-        !fits(current, node_bit_size) || !fits(next, node_bit_size)) {
+    for (const auto& frame : activations_) {
+        const auto& activation = frame.activation;
+        if (bit_size == 0U &&
+            (handle == activation.procedure || handle == activation.network_state.handle ||
+             handle == activation.result_register ||
+             (!activation.local_resolver.null &&
+              handle == activation.local_resolver.handle) ||
+             (!activation.previous_activation.null &&
+              handle == activation.previous_activation.handle))) {
+            return std::unexpected(error(
+                VmErrorCode::invalid_state,
+                "cannot delete a register used by an active activation"));
+        }
+        if (!fits(activation.network_state, runtime_reference_bit_size) ||
+            !fits(activation.local_resolver, node_bit_size) ||
+            !fits(activation.previous_activation, activation_bit_size)) {
+            return std::unexpected(error(
+                VmErrorCode::invalid_state,
+                "resize would invalidate an active activation reference"));
+        }
+        auto active_node = read_network_state(activation);
+        if (!active_node) return std::unexpected(active_node.error());
+        if (!fits(*active_node, node_bit_size)) {
+            return std::unexpected(error(
+                VmErrorCode::invalid_state,
+                "resize would invalidate an active node reference"));
+        }
+    }
+    if (!fits(current, node_bit_size) || !fits(next, node_bit_size)) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "resize would invalidate an active VM reference"));
     }
     return {};
 }
 
-OperandResolver VirtualMachine::operand_resolver() const {
-    return OperandResolver(*registers_, activation_.procedure, resolvers_);
+OperandResolver VirtualMachine::operand_resolver(const ActivationFrame& frame) const {
+    return OperandResolver(*registers_, frame.activation.procedure, frame.resolvers);
 }
 
 VmResult<StepResult> VirtualMachine::step() {
@@ -176,12 +219,14 @@ VmResult<StepResult> VirtualMachine::step() {
 }
 
 VmResult<StepResult> VirtualMachine::step_impl() {
-    if (activation_.prefix.kind != PrefixKind::none) {
+    auto& frame = current_frame();
+    auto& activation = frame.activation;
+    if (activation.prefix.kind != PrefixKind::none) {
         return std::unexpected(error(VmErrorCode::unsupported_command,
                                      "prefix execution belongs to the next VM stage"));
     }
 
-    auto current_reference = read_network_state();
+    auto current_reference = read_network_state(activation);
     if (!current_reference) {
         return std::unexpected(current_reference.error());
     }
@@ -194,15 +239,15 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                                      "procedure calls belong to the next VM stage"));
     }
 
-    auto procedure = registers_->view(activation_.procedure);
+    auto procedure = registers_->view(activation.procedure);
     if (!procedure) {
         return std::unexpected(register_error(procedure.error()));
     }
-    if (activation_.procedure_position > (*procedure)->size()) {
+    if (activation.procedure_position > (*procedure)->size()) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "procedure position is out of range"));
     }
-    BitCursor cursor(**procedure, activation_.procedure_position);
+    BitCursor cursor(**procedure, activation.procedure_position);
     auto instruction = decode_builtin(node->command, cursor);
     if (!instruction) {
         return std::unexpected(codec_error(instruction.error()));
@@ -215,7 +260,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     if (auto valid = validate_node_target(next); !valid) {
         return std::unexpected(valid.error());
     }
-    if (auto valid = validate_network_state_write(); !valid) {
+    if (auto valid = validate_network_state_write(activation); !valid) {
         return std::unexpected(valid.error());
     }
     auto encoded_next = encode_runtime_reference(next);
@@ -223,7 +268,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         return std::unexpected(codec_error(encoded_next.error()));
     }
 
-    const auto resolver = operand_resolver();
+    const auto resolver = operand_resolver(frame);
     std::optional<PreparedWrite> data_write;
     std::optional<std::pair<RegisterHandle, std::uint64_t>> resize;
     auto next_position = instruction->next_procedure_position;
@@ -346,14 +391,14 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     }
 
     auto written = registers_->write(
-        {activation_.network_state.handle, activation_.network_state.bit_offset},
+        {activation.network_state.handle, activation.network_state.bit_offset},
         *encoded_next);
     if (!written) {
         return std::unexpected(register_error(written.error()));
     }
-    activation_.procedure_position = next_position;
+    activation.procedure_position = next_position;
     return StepResult{instruction->command, *instruction->branch, next,
-                      activation_.procedure_position};
+                      activation.procedure_position};
 }
 
 }  // namespace ubcm
