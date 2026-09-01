@@ -171,6 +171,27 @@ void test_registers_and_addressing() {
     ubcm::RegisterSelector selector{ubcm::RegisterClass::global, name};
     ubcm::ResolutionContext context{nullptr, nullptr, nullptr, &resolver};
     expect(ubcm::resolve_selector(selector, context) && *ubcm::resolve_selector(selector, context) == handle, "selector resolution");
+
+    ubcm::NameResolver wrong_class_resolver;
+    expect(wrong_class_resolver.bind(
+               name, {ubcm::RegisterClass::local, 8}).has_value(),
+           "bind mismatched register class");
+    ubcm::ResolutionContext wrong_context{nullptr, nullptr, nullptr,
+                                          &wrong_class_resolver};
+    expect(!ubcm::resolve_selector(selector, wrong_context),
+           "selector rejects mismatched register class");
+
+    auto truncated_selector = *ubcm::BitVector::from_bit_string("11");
+    ubcm::BitCursor selector_cursor(truncated_selector);
+    expect(!ubcm::decode_register_selector(selector_cursor) &&
+               selector_cursor.position() == 0,
+           "failed selector decoding is transactional");
+
+    auto immediate_destination = ubcm::encode_reference(std::uint64_t{5});
+    ubcm::BitCursor destination_cursor(immediate_destination);
+    expect(!ubcm::decode_destination(destination_cursor) &&
+               destination_cursor.position() == 0,
+           "failed destination decoding is transactional");
 }
 
 void test_runtime_references_and_nodes() {
@@ -222,6 +243,15 @@ void test_activation_records() {
 
     encoded->set(0, true);
     expect(!ubcm::decode_activation(*encoded), "invalid activation magic rejection");
+
+    activation.flags = 1;
+    expect(!ubcm::encode_activation(activation), "reserved activation flags rejection");
+
+    activation.flags = 0;
+    encoded = ubcm::encode_activation(activation);
+    encoded->set(24, true);
+    expect(!ubcm::decode_activation(*encoded),
+           "non-zero encoded activation flags rejection");
 }
 
 void test_builtin_decoder() {
@@ -367,6 +397,18 @@ void test_operand_resolution() {
            "immediate source uses minimal raw bits");
     expect(resolver.read_source_uint(immediate) == 5,
            "immediate source is an unsigned integer");
+
+    auto local = registers.create(ubcm::RegisterClass::local,
+                                  *ubcm::BitVector::from_bit_string("0"));
+    ubcm::NameResolver mismatched_globals;
+    expect(local && mismatched_globals.bind(name, *local),
+           "bind mismatched operand register");
+    ubcm::OperandResolver mismatched_resolver(
+        registers, {ubcm::RegisterClass::procedure, 0},
+        {.global = &mismatched_globals});
+    expect(!mismatched_resolver.resolve_address(
+               {{ubcm::RegisterClass::global, name}, 0}),
+           "operand resolver rejects mismatched register class");
 }
 
 struct VmNodeStorage {

@@ -89,6 +89,10 @@ CodecResult<PrefixState> decode_prefix(std::uint64_t kind_value,
 }  // namespace
 
 CodecResult<BitVector> encode_activation(const ActivationRecord& activation) {
+    if (activation.flags != 0U) {
+        return std::unexpected(error(CodecErrorCode::invalid_data, 24,
+                                     "activation flags are reserved"));
+    }
     if (!activation.local_resolver.null &&
         activation.local_resolver.bit_offset % node_bit_size != 0U) {
         return std::unexpected(error(CodecErrorCode::invalid_data, 288,
@@ -138,7 +142,7 @@ CodecResult<ActivationRecord> decode_activation(BitCursor& cursor) {
     auto version = input.read_uint(8);
     auto flags = input.read_uint(8);
     if (!magic || !version || !flags || *magic != activation_magic ||
-        *version != activation_version) {
+        *version != activation_version || *flags != 0U) {
         return std::unexpected(error(CodecErrorCode::invalid_data, start,
                                      "invalid activation header"));
     }

@@ -70,6 +70,10 @@ OperandResult<RegisterHandle> OperandResolver::resolve_selector(
     if (!handle) {
         return std::unexpected(from_register_error(handle.error()));
     }
+    if (handle->class_id != selector.class_id) {
+        return std::unexpected(error(OperandErrorCode::invalid_reference,
+                                     "resolved register has the wrong class"));
+    }
     return *handle;
 }
 
