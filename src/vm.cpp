@@ -1,6 +1,8 @@
 #include "ubcm/vm.hpp"
 
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -12,7 +14,10 @@ VmError error(VmErrorCode code, std::string message) {
 }
 
 VmError register_error(const RegisterError& source) {
-    return error(VmErrorCode::register_access, source.message);
+    return error(source.code == RegisterError::Code::resource_exhausted
+                     ? VmErrorCode::resource_exhausted
+                     : VmErrorCode::register_access,
+                 source.message);
 }
 
 VmError codec_error(const CodecError& source) {
@@ -20,9 +25,12 @@ VmError codec_error(const CodecError& source) {
 }
 
 VmError operand_error(const OperandError& source) {
-    return error(source.code == OperandErrorCode::decode_error
-                     ? VmErrorCode::decode_error
-                     : VmErrorCode::register_access,
+    const auto code = source.code == OperandErrorCode::decode_error
+                          ? VmErrorCode::decode_error
+                      : source.code == OperandErrorCode::resource_exhausted
+                          ? VmErrorCode::resource_exhausted
+                          : VmErrorCode::register_access;
+    return error(code,
                  source.message);
 }
 
@@ -137,8 +145,8 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
     const auto fits = [handle, bit_size](const RuntimeReference& reference,
                                          std::uint64_t required_size) {
         return reference.null || handle != reference.handle ||
-               reference.bit_offset <= bit_size &&
-                   required_size <= bit_size - reference.bit_offset;
+               (reference.bit_offset <= bit_size &&
+                required_size <= bit_size - reference.bit_offset);
     };
     if (!fits(activation_.network_state, runtime_reference_bit_size) ||
         !fits(current, node_bit_size) || !fits(next, node_bit_size)) {
@@ -153,6 +161,21 @@ OperandResolver VirtualMachine::operand_resolver() const {
 }
 
 VmResult<StepResult> VirtualMachine::step() {
+    try {
+        return step_impl();
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(error(VmErrorCode::resource_exhausted,
+                                     "VM step ran out of memory"));
+    } catch (const std::length_error&) {
+        return std::unexpected(error(VmErrorCode::resource_exhausted,
+                                     "VM step requires an unsupported allocation size"));
+    } catch (const std::out_of_range&) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "VM step accessed an invalid bit range"));
+    }
+}
+
+VmResult<StepResult> VirtualMachine::step_impl() {
     if (activation_.prefix.kind != PrefixKind::none) {
         return std::unexpected(error(VmErrorCode::unsupported_command,
                                      "prefix execution belongs to the next VM stage"));

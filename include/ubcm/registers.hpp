@@ -35,6 +35,7 @@ struct RegisterError {
         immutable,
         out_of_range,
         invalid_handle,
+        resource_exhausted,
     } code{};
     std::string message;
 };

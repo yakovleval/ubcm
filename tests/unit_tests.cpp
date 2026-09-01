@@ -55,6 +55,15 @@ void test_cursor() {
 
 void test_codecs() {
     expect(ubcm::encode_size(256).to_bit_string() == "0010000000100000000", "size encoding");
+    const auto maximum_size = std::numeric_limits<std::uint64_t>::max();
+    const auto maximum_size_bits = ubcm::encode_size(maximum_size);
+    expect(maximum_size_bits.size() == 67 &&
+               maximum_size_bits.to_bit_string() == "111" + std::string(64, '1'),
+           "maximum size encoding");
+    ubcm::BitCursor maximum_size_cursor(maximum_size_bits);
+    expect(ubcm::decode_size(maximum_size_cursor) == maximum_size &&
+               maximum_size_cursor.remaining() == 0,
+           "maximum size round trip");
     expect(ubcm::encode_var_uint(5).to_bit_string() == "00000000011101", "unsigned encoding");
     expect(ubcm::encode_var_int(-2).to_bit_string() == "0000000001010", "signed encoding");
 

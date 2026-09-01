@@ -54,16 +54,22 @@ CodecResult<BitVector> BitVector::from_bytes(std::vector<std::uint8_t> bytes,
 CodecResult<BitVector> BitVector::from_bit_string(std::string_view bits) {
     BitVector result;
     try {
-        result.bytes_.reserve((bits.size() + 7U) / 8U);
-    } catch (const std::length_error&) {
-        return std::unexpected(error(CodecErrorCode::overflow, 0, "bit vector is too large"));
-    }
-    for (const char bit : bits) {
-        if (bit != '0' && bit != '1') {
-            return std::unexpected(error(CodecErrorCode::invalid_data, result.bit_size_,
-                                          "bit string contains a character other than 0 or 1"));
+        const auto byte_count = bits.size() / 8U + (bits.size() % 8U != 0U ? 1U : 0U);
+        result.bytes_.reserve(byte_count);
+        for (const char bit : bits) {
+            if (bit != '0' && bit != '1') {
+                return std::unexpected(error(
+                    CodecErrorCode::invalid_data, result.bit_size_,
+                    "bit string contains a character other than 0 or 1"));
+            }
+            result.push_back(bit == '1');
         }
-        result.push_back(bit == '1');
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(error(CodecErrorCode::overflow, 0,
+                                     "not enough memory for bit vector"));
+    } catch (const std::length_error&) {
+        return std::unexpected(error(CodecErrorCode::overflow, 0,
+                                     "bit vector is too large for this platform"));
     }
     return result;
 }

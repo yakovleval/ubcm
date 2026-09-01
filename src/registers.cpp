@@ -61,13 +61,21 @@ RegisterResult<RegisterHandle> RegisterBank::create(RegisterClass class_id,
             return std::unexpected(error(RegisterError::Code::invalid_handle,
                                           "register id space is exhausted"));
         }
-        handle.id = next_id_++;
+        handle.id = next_id_;
     }
     if (entries_.contains(handle)) {
         return std::unexpected(error(RegisterError::Code::invalid_handle,
                                       "procedure register already exists"));
     }
-    entries_.emplace(handle, Entry{contents, immutable});
+    try {
+        entries_.emplace(handle, Entry{contents, immutable});
+    } catch (const std::exception&) {
+        return std::unexpected(error(RegisterError::Code::resource_exhausted,
+                                      "register creation failed"));
+    }
+    if (class_id != RegisterClass::procedure) {
+        ++next_id_;
+    }
     return handle;
 }
 
@@ -120,7 +128,12 @@ RegisterResult<BitVector> RegisterBank::read(RegisterAddress address,
         return std::unexpected(error(RegisterError::Code::out_of_range,
                                       "register read is out of range"));
     }
-    return (*found)->contents.slice(address.bit_offset, bit_count);
+    try {
+        return (*found)->contents.slice(address.bit_offset, bit_count);
+    } catch (const std::exception&) {
+        return std::unexpected(error(RegisterError::Code::resource_exhausted,
+                                      "register read allocation failed"));
+    }
 }
 
 RegisterResult<void> RegisterBank::write(RegisterAddress address, const BitVector& value) {

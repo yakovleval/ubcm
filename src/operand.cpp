@@ -12,7 +12,10 @@ OperandError error(OperandErrorCode code, const char* message) {
 }
 
 OperandError from_register_error(const RegisterError& source) {
-    return {OperandErrorCode::register_access, source.message};
+    return {source.code == RegisterError::Code::resource_exhausted
+                ? OperandErrorCode::resource_exhausted
+                : OperandErrorCode::register_access,
+            source.message};
 }
 
 OperandError from_codec_error(const CodecError& source) {

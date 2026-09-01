@@ -18,6 +18,7 @@ enum class OperandErrorCode {
     invalid_value,
     immutable_destination,
     insufficient_destination_capacity,
+    resource_exhausted,
 };
 
 struct OperandError {

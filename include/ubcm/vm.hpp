@@ -17,6 +17,7 @@ enum class VmErrorCode {
     decode_error,
     mathematical_error,
     unsupported_command,
+    resource_exhausted,
 };
 
 struct VmError {
@@ -43,6 +44,7 @@ public:
     [[nodiscard]] VmResult<StepResult> step();
 
 private:
+    [[nodiscard]] VmResult<StepResult> step_impl();
     [[nodiscard]] VmResult<NodeReference> read_network_state() const;
     [[nodiscard]] VmResult<Node> read_node(const NodeReference& reference) const;
     [[nodiscard]] VmResult<void> validate_node_target(

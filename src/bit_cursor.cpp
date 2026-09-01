@@ -1,5 +1,6 @@
 #include "ubcm/bit_cursor.hpp"
 
+#include <new>
 #include <stdexcept>
 
 namespace ubcm {
@@ -46,12 +47,20 @@ CodecResult<BitVector> BitCursor::read_bits(std::uint64_t count) {
         return std::unexpected(error(CodecErrorCode::unexpected_end, position_,
                                      "not enough bits in stream"));
     }
-    BitVector result(count);
-    for (std::uint64_t index = 0; index < count; ++index) {
-        result.set(index, bits_->at(position_ + index));
+    try {
+        BitVector result(count);
+        for (std::uint64_t index = 0; index < count; ++index) {
+            result.set(index, bits_->at(position_ + index));
+        }
+        position_ += count;
+        return result;
+    } catch (const std::bad_alloc&) {
+        return std::unexpected(error(CodecErrorCode::overflow, position_,
+                                     "not enough memory for bit range"));
+    } catch (const std::length_error&) {
+        return std::unexpected(error(CodecErrorCode::overflow, position_,
+                                     "bit range is too large for this platform"));
     }
-    position_ += count;
-    return result;
 }
 
 CodecResult<std::uint64_t> BitCursor::read_uint(std::uint8_t width) {
