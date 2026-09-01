@@ -69,6 +69,14 @@ const ActivationFrame& VirtualMachine::current_frame() const noexcept {
     return activations_.back();
 }
 
+VmResult<std::size_t> VirtualMachine::activation_index(std::uint64_t depth) const {
+    if (depth >= activations_.size()) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "activation depth is out of range"));
+    }
+    return activations_.size() - 1U - static_cast<std::size_t>(depth);
+}
+
 const ActivationRecord& VirtualMachine::current_activation() const noexcept {
     return current_frame().activation;
 }
@@ -271,9 +279,31 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     const auto resolver = operand_resolver(frame);
     std::optional<PreparedWrite> data_write;
     std::optional<std::pair<RegisterHandle, std::uint64_t>> resize;
+    std::optional<PrefixState> next_prefix;
     auto next_position = instruction->next_procedure_position;
 
     switch (instruction->command) {
+        case BuiltinCommand::read_prefix:
+        case BuiltinCommand::modify_prefix: {
+            const auto& arguments = std::get<DepthArguments>(instruction->arguments);
+            if (auto index = activation_index(arguments.depth); !index) {
+                return std::unexpected(index.error());
+            }
+            const auto kind = instruction->command == BuiltinCommand::read_prefix
+                                  ? PrefixKind::read
+                                  : PrefixKind::modify;
+            next_prefix = PrefixState{kind, arguments.depth, false};
+            break;
+        }
+        case BuiltinCommand::condition_prefix: {
+            const auto& arguments = std::get<ConditionArguments>(instruction->arguments);
+            auto address = resolver.resolve_destination(arguments.condition);
+            if (!address) return std::unexpected(operand_error(address.error()));
+            auto condition = registers_->read(*address, 1);
+            if (!condition) return std::unexpected(register_error(condition.error()));
+            next_prefix = PrefixState{PrefixKind::condition, 0, condition->at(0)};
+            break;
+        }
         case BuiltinCommand::branch:
             break;
         case BuiltinCommand::compute: {
@@ -397,6 +427,9 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         return std::unexpected(register_error(written.error()));
     }
     activation.procedure_position = next_position;
+    if (next_prefix) {
+        activation.prefix = *next_prefix;
+    }
     return StepResult{instruction->command, *instruction->branch, next,
                       activation.procedure_position};
 }

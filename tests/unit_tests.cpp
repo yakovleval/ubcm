@@ -480,6 +480,91 @@ ubcm::NodeReference stored_node_reference(ubcm::RegisterBank& registers,
     return *reference;
 }
 
+void test_vm_prefix_commands() {
+    {
+        ubcm::RegisterBank registers;
+        auto program = ubcm::encode_size(1);
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto nodes = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::read_prefix);
+        ubcm::ActivationRecord root;
+        ubcm::ActivationRecord current;
+        current.procedure = *procedure;
+        current.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+        std::vector<ubcm::ActivationFrame> activations{
+            {root, {}},
+            {current, {}},
+        };
+        ubcm::VirtualMachine vm(registers, std::move(activations));
+        auto step = vm.step();
+        expect(step && vm.current_activation().prefix ==
+                           ubcm::PrefixState{ubcm::PrefixKind::read, 1, false},
+               "read prefix stores activation depth");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        auto program = ubcm::encode_size(0);
+        program.push_back(false);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto nodes = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::modify_prefix);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+        ubcm::VirtualMachine vm(registers, activation);
+        auto step = vm.step();
+        expect(step && vm.current_activation().prefix ==
+                           ubcm::PrefixState{ubcm::PrefixKind::modify, 0, false},
+               "modify prefix stores activation depth");
+    }
+
+    for (const bool expected_condition : {false, true}) {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        auto condition_name = *ubcm::BitVector::from_bit_string("1");
+        auto condition = registers.create(
+            ubcm::RegisterClass::global, ubcm::BitVector(1, expected_condition));
+        expect(condition && globals.bind(condition_name, *condition),
+               "bind prefix condition");
+        const ubcm::DestinationOperand condition_reference{ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, condition_name}, 0}}};
+        auto program = ubcm::encode_destination(condition_reference);
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto nodes = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::condition_prefix);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+        auto step = vm.step();
+        expect(step && vm.current_activation().prefix ==
+                           ubcm::PrefixState{ubcm::PrefixKind::condition, 0,
+                                             expected_condition},
+               "condition prefix stores evaluated bit");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        auto program = ubcm::encode_size(1);
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure, program, true);
+        const auto nodes = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::read_prefix);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+        ubcm::VirtualMachine vm(registers, activation);
+        expect(!vm.step() && vm.current_activation().procedure_position == 0 &&
+                   vm.current_activation().prefix.kind == ubcm::PrefixKind::none &&
+                   stored_node_reference(registers, nodes.state) ==
+                       ubcm::RuntimeReference::at(nodes.nodes, 0),
+               "invalid prefix depth preserves VM state");
+    }
+}
+
 void test_vm_core_builtin_effects() {
     {
         ubcm::RegisterBank registers;
@@ -809,6 +894,7 @@ int main() {
         {"vm_branch_step", test_vm_branch_step},
         {"vm_activation_stack", test_vm_activation_stack},
         {"operand_resolution", test_operand_resolution},
+        {"vm_prefix_commands", test_vm_prefix_commands},
         {"vm_core_builtin_effects", test_vm_core_builtin_effects},
         {"vm_compute_builtin", test_vm_compute_builtin},
     };

@@ -55,6 +55,8 @@ public:
 private:
     [[nodiscard]] ActivationFrame& current_frame() noexcept;
     [[nodiscard]] const ActivationFrame& current_frame() const noexcept;
+    [[nodiscard]] VmResult<std::size_t> activation_index(
+        std::uint64_t depth) const;
     [[nodiscard]] VmResult<StepResult> step_impl();
     [[nodiscard]] VmResult<NodeReference> read_network_state(
         const ActivationRecord& activation) const;
