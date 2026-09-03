@@ -437,6 +437,73 @@ void test_operand_resolution() {
            "operand resolver rejects mismatched register class");
 }
 
+void test_indirect_reference_limits() {
+    const auto byte_name = [](std::uint8_t value) {
+        ubcm::BitVector name(8);
+        for (std::uint8_t index = 0; index < 8U; ++index) {
+            name.set(index, ((value >> (7U - index)) & 1U) != 0U);
+        }
+        return name;
+    };
+
+    const auto resolve_chain = [&](std::size_t indirection_count) {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver globals;
+        const auto target_name = byte_name(0xffU);
+        auto target = registers.create(
+            ubcm::RegisterClass::global,
+            *ubcm::BitVector::from_bit_string("101"));
+        expect(target && globals.bind(target_name, *target),
+               "bind indirect chain target");
+
+        ubcm::AddressReference reference = ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, target_name}, 1}};
+        for (std::size_t index = 0; index < indirection_count; ++index) {
+            const auto pointer_name = byte_name(static_cast<std::uint8_t>(index));
+            auto contents = ubcm::encode_reference(reference);
+            auto pointer = registers.create(ubcm::RegisterClass::global, contents);
+            expect(pointer && globals.bind(pointer_name, *pointer),
+                   "bind indirect chain link");
+            reference = ubcm::IndirectReference{
+                {{ubcm::RegisterClass::global, pointer_name}, 0}};
+        }
+
+        ubcm::OperandResolver resolver(
+            registers, {ubcm::RegisterClass::procedure, 0},
+            {.global = &globals});
+        return resolver.resolve_reference(reference);
+    };
+
+    auto maximum_chain = resolve_chain(64);
+    expect(maximum_chain && !maximum_chain->immediate &&
+               maximum_chain->address.bit_offset == 1,
+           "64 indirect references are accepted");
+
+    auto excessive_chain = resolve_chain(65);
+    expect(!excessive_chain &&
+               excessive_chain.error().code ==
+                   ubcm::OperandErrorCode::invalid_reference,
+           "65 indirect references are rejected");
+
+    ubcm::RegisterBank cycle_registers;
+    ubcm::NameResolver cycle_globals;
+    const auto cycle_name = byte_name(0);
+    const ubcm::AddressReference cycle_reference = ubcm::IndirectReference{
+        {{ubcm::RegisterClass::global, cycle_name}, 0}};
+    auto cycle_contents = ubcm::encode_reference(cycle_reference);
+    auto cycle_register = cycle_registers.create(ubcm::RegisterClass::global,
+                                                 cycle_contents);
+    expect(cycle_register && cycle_globals.bind(cycle_name, *cycle_register),
+           "bind cyclic indirect reference");
+    ubcm::OperandResolver cycle_resolver(
+        cycle_registers, {ubcm::RegisterClass::procedure, 0},
+        {.global = &cycle_globals});
+    auto cycle = cycle_resolver.resolve_reference(cycle_reference);
+    expect(!cycle && cycle.error().code ==
+                         ubcm::OperandErrorCode::invalid_reference,
+           "cyclic indirect reference is rejected");
+}
+
 struct VmNodeStorage {
     ubcm::RegisterHandle nodes;
     ubcm::RegisterHandle state;
@@ -1178,6 +1245,7 @@ int main() {
         {"vm_branch_step", test_vm_branch_step},
         {"vm_activation_stack", test_vm_activation_stack},
         {"operand_resolution", test_operand_resolution},
+        {"indirect_reference_limits", test_indirect_reference_limits},
         {"vm_prefix_commands", test_vm_prefix_commands},
         {"vm_prefix_application", test_vm_prefix_application},
         {"vm_core_builtin_effects", test_vm_core_builtin_effects},
