@@ -71,6 +71,8 @@ public:
     RegisterResult<RegisterHandle> create(RegisterClass class_id,
                                            const BitVector& contents,
                                            bool immutable = false);
+    RegisterResult<void> insert(std::uint64_t id, const BitVector& contents,
+                                bool immutable = false);
     RegisterResult<void> erase(RegisterHandle handle);
     RegisterResult<void> resize(RegisterHandle handle, std::uint64_t bit_size,
                                 bool fill_value = false);

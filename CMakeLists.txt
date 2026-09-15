@@ -22,6 +22,7 @@ add_library(ubcm_vm STATIC
     src/builtin.cpp
     src/operand.cpp
     src/vm.cpp
+    src/program.cpp
     src/ubcm.cpp
 )
 
@@ -53,4 +54,7 @@ if(BUILD_TESTING)
     target_link_libraries(ubcm_unit_tests PRIVATE ubcm::vm)
 
     add_test(NAME ubcm.unit COMMAND ubcm_unit_tests)
+    add_executable(ubcm_program_tests tests/program_tests.cpp)
+    target_link_libraries(ubcm_program_tests PRIVATE ubcm::vm)
+    add_test(NAME ubcm.program COMMAND ubcm_program_tests)
 endif()

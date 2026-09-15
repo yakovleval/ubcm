@@ -13,6 +13,7 @@
 #include "ubcm/builtin.hpp"
 #include "ubcm/operand.hpp"
 #include "ubcm/vm.hpp"
+#include "ubcm/program.hpp"
 
 #include <string_view>
 

@@ -105,6 +105,23 @@ RegisterResult<void> RegisterBank::erase(RegisterHandle handle) {
     return {};
 }
 
+RegisterResult<void> RegisterBank::insert(std::uint64_t id, const BitVector& contents,
+                                         bool immutable) {
+    const RegisterHandle handle{RegisterClass::global, id};
+    if (id >= (std::uint64_t{1} << 62) || entries_.contains(handle)) {
+        return std::unexpected(error(RegisterError::Code::invalid_handle,
+                                      "invalid or duplicate register ID"));
+    }
+    try {
+        entries_.emplace(handle, Entry{contents, immutable});
+    } catch (const std::exception&) {
+        return std::unexpected(error(RegisterError::Code::resource_exhausted,
+                                      "register import failed"));
+    }
+    if (id >= next_id_) next_id_ = id + 1;
+    return {};
+}
+
 RegisterResult<void> RegisterBank::resize(RegisterHandle handle, std::uint64_t bit_size,
                                           bool fill_value) {
     const auto found = find(handle);
