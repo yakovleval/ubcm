@@ -60,6 +60,9 @@ if(BUILD_TESTING)
     add_executable(ubcm_program_tests tests/program_tests.cpp)
     target_link_libraries(ubcm_program_tests PRIVATE ubcm::vm)
     add_test(NAME ubcm.program COMMAND ubcm_program_tests)
+    add_executable(ubcm_codec_fuzz_tests tests/codec_fuzz_tests.cpp)
+    target_link_libraries(ubcm_codec_fuzz_tests PRIVATE ubcm::vm)
+    add_test(NAME ubcm.codec_fuzz COMMAND ubcm_codec_fuzz_tests)
     add_test(NAME ubcm.cli COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:ubcm> -DDEMO=$<TARGET_FILE:ubcm_demo>
         -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-test

@@ -94,11 +94,63 @@ void test_program() {
     expect(!ubcm::validate_program(invalid), "reject reserved flags");
 }
 
+void test_two_languages() {
+    for (std::uint64_t value : {5U, 6U}) {
+        const auto name = *ubcm::BitVector::from_bit_string("1");
+        auto handler = ubcm::encode_source({value, 0, true});
+        handler.append(ubcm::encode_destination({ubcm::DirectReference{
+            {{ubcm::RegisterClass::global, name}, 0}}}));
+        handler.push_back(true);
+        ubcm::Node call;
+        call.kind = ubcm::NodeKind::procedure_call;
+        call.procedure = {ubcm::RegisterClass::global, 3};
+        call.entry = ubcm::RuntimeReference::at({ubcm::RegisterClass::global, 4}, 0);
+        call.next0 = ubcm::RuntimeReference::at({ubcm::RegisterClass::global, 1},
+                                               ubcm::node_bit_size);
+        ubcm::Node finish;
+        finish.command = static_cast<std::uint8_t>(ubcm::BuiltinCommand::finish_call);
+        ubcm::Node copy;
+        copy.command = static_cast<std::uint8_t>(ubcm::BuiltinCommand::copy);
+        copy.next1 = ubcm::RuntimeReference::at({ubcm::RegisterClass::global, 4},
+                                               ubcm::node_bit_size);
+        auto network = *ubcm::encode_node(call);
+        network.append(*ubcm::encode_node(finish));
+        auto handler_network = *ubcm::encode_node(copy);
+        handler_network.append(*ubcm::encode_node(finish));
+        ubcm::ProgramImage image{{ubcm::RegisterClass::global, 0},
+            ubcm::RuntimeReference::at({ubcm::RegisterClass::global, 1}, 0),
+            {{0, 1, {}, {}}, // identical empty procedure for both languages
+             {1, 2, *ubcm::BitVector::from_bit_string("0"), network},
+             {2, 0, name, ubcm::BitVector(3)},
+             {3, 1, *ubcm::BitVector::from_bit_string("00"), handler},
+             {4, 2, *ubcm::BitVector::from_bit_string("01"), handler_network}}};
+        auto bytes = ubcm::encode_program(image);
+        expect(bytes.has_value(), "encode language example");
+        auto decoded = ubcm::decode_program(*bytes);
+        expect(decoded.has_value(), "decode language example");
+        auto loaded = ubcm::load_program(*decoded);
+        expect(loaded.has_value(), "load language example");
+        auto state = loaded->registers.create(ubcm::RegisterClass::global,
+                                               *ubcm::encode_runtime_reference(loaded->entry));
+        expect(state.has_value(), "create language execution state");
+        ubcm::ActivationRecord activation;
+        activation.procedure = loaded->procedure;
+        activation.network_state = ubcm::RuntimeReference::at(*state, 0);
+        ubcm::VirtualMachine vm(loaded->registers, activation, {.global = &loaded->names});
+        auto result = vm.run(4);
+        auto output = loaded->registers.read({{ubcm::RegisterClass::global, 2}, 0}, 3);
+        expect(result && result->halted && result->steps == 4 && output &&
+                   output->to_bit_string() == (value == 5 ? "101" : "110"),
+               "same procedure has different behavior under different networks");
+    }
+}
+
 } // namespace
 
 int main() {
     try {
         test_program();
+        test_two_languages();
         std::cout << "program tests passed\n";
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

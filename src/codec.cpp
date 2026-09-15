@@ -115,8 +115,8 @@ CodecResult<std::uint64_t> decode_var_uint(BitCursor& cursor) {
 }
 
 BitVector encode_var_int(std::int64_t value) {
-    const auto width = minimal_signed_width(value);
-    BitVector output = encode_size(value == 0 ? 0U : width);
+    const auto width = value == 0 ? std::uint8_t{0} : minimal_signed_width(value);
+    BitVector output = encode_size(width);
     if (width != 0U) {
         auto raw = static_cast<std::uint64_t>(value);
         if (width < 64U) {
