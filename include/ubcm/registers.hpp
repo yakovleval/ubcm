@@ -43,22 +43,25 @@ struct RegisterError {
 template <typename T>
 using RegisterResult = std::expected<T, RegisterError>;
 
-class NameResolver {
-public:
-    RegisterResult<void> bind(const BitVector& name, RegisterHandle handle);
-    RegisterResult<void> unbind(const BitVector& name);
-    [[nodiscard]] RegisterResult<RegisterHandle> resolve(const BitVector& name) const;
-    [[nodiscard]] bool contains(const BitVector& name) const;
-
-private:
-    std::unordered_map<std::string, RegisterHandle> names_;
-};
-
 struct RegisterAddress {
     RegisterHandle handle;
     std::uint64_t bit_offset{};
 
     friend bool operator==(const RegisterAddress&, const RegisterAddress&) = default;
+};
+
+class NameResolver {
+public:
+    RegisterResult<void> bind(const BitVector& name, RegisterHandle handle);
+    RegisterResult<void> bind(const BitVector& name, RegisterAddress address);
+    RegisterResult<void> unbind(const BitVector& name);
+    [[nodiscard]] RegisterResult<RegisterHandle> resolve(const BitVector& name) const;
+    [[nodiscard]] RegisterResult<RegisterAddress> resolve_address(
+        const BitVector& name) const;
+    [[nodiscard]] bool contains(const BitVector& name) const;
+
+private:
+    std::unordered_map<std::string, RegisterAddress> names_;
 };
 
 class RegisterBank {

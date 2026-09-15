@@ -171,16 +171,21 @@ void test_registers_and_addressing() {
     expect(bank.read({*created, 1}, 2)->to_bit_string() == "11", "read register");
     ubcm::RegisterSelector selector{ubcm::RegisterClass::global, name};
     ubcm::ResolutionContext context{nullptr, nullptr, nullptr, &resolver};
-    expect(ubcm::resolve_selector(selector, context) && *ubcm::resolve_selector(selector, context) == handle, "selector resolution");
+    expect(ubcm::resolve_selector(selector, context) &&
+               *ubcm::resolve_selector(selector, context) ==
+                   ubcm::RegisterAddress{handle, 0},
+           "selector resolution");
 
     ubcm::NameResolver wrong_class_resolver;
     expect(wrong_class_resolver.bind(
-               name, {ubcm::RegisterClass::local, 8}).has_value(),
+               name, ubcm::RegisterHandle{ubcm::RegisterClass::local, 8}).has_value(),
            "bind mismatched register class");
     ubcm::ResolutionContext wrong_context{nullptr, nullptr, nullptr,
                                           &wrong_class_resolver};
-    expect(!ubcm::resolve_selector(selector, wrong_context),
-           "selector rejects mismatched register class");
+    expect(ubcm::resolve_selector(selector, wrong_context) ==
+               ubcm::RegisterAddress{
+                   {ubcm::RegisterClass::local, 8}, 0},
+           "selector class chooses the resolver scope");
 
     auto truncated_selector = *ubcm::BitVector::from_bit_string("11");
     ubcm::BitCursor selector_cursor(truncated_selector);
@@ -432,9 +437,30 @@ void test_operand_resolution() {
     ubcm::OperandResolver mismatched_resolver(
         registers, {ubcm::RegisterClass::procedure, 0},
         {.global = &mismatched_globals});
-    expect(!mismatched_resolver.resolve_address(
-               {{ubcm::RegisterClass::global, name}, 0}),
-           "operand resolver rejects mismatched register class");
+    expect(mismatched_resolver.resolve_address(
+               {{ubcm::RegisterClass::global, name}, 0}) ==
+               ubcm::RegisterAddress{*local, 0},
+           "operand selector class chooses the resolver scope");
+
+    auto backing = registers.create(
+        ubcm::RegisterClass::global,
+        *ubcm::BitVector::from_bit_string("00000000"));
+    ubcm::NameResolver locals;
+    expect(backing && locals.bind(name, ubcm::RegisterAddress{*backing, 3}),
+           "bind local register inside global storage");
+    ubcm::OperandResolver local_resolver(
+        registers, {ubcm::RegisterClass::procedure, 0}, {.local = &locals});
+    expect(local_resolver.write_destination(
+               ubcm::DestinationOperand{ubcm::DirectReference{
+                   {{ubcm::RegisterClass::local, name}, 1}}}, value) &&
+               registers.read({*backing, 0}, 8)->to_bit_string() == "00001100",
+           "local register uses its global base offset");
+
+    expect(registers.write(
+               {{ubcm::RegisterClass::local, backing->id}, 0},
+               *ubcm::BitVector::from_bit_string("1")) &&
+               registers.read({*backing, 0}, 1)->to_bit_string() == "1",
+           "logical handles alias one physical global register");
 }
 
 void test_indirect_reference_limits() {

@@ -65,7 +65,7 @@ public:
 private:
     [[nodiscard]] OperandResult<ResolvedReference> resolve_reference_impl(
         const AddressReference& reference, std::uint8_t depth) const;
-    [[nodiscard]] OperandResult<RegisterHandle> resolve_selector(
+    [[nodiscard]] OperandResult<RegisterAddress> resolve_selector(
         const RegisterSelector& selector) const;
 
     RegisterBank* registers_;

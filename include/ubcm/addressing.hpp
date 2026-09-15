@@ -75,7 +75,7 @@ struct ResolutionContext {
 [[nodiscard]] CodecResult<DestinationOperand> decode_destination(BitCursor& cursor);
 [[nodiscard]] BitVector encode_destination(const DestinationOperand& destination);
 
-[[nodiscard]] RegisterResult<RegisterHandle> resolve_selector(
+[[nodiscard]] RegisterResult<RegisterAddress> resolve_selector(
     const RegisterSelector& selector, const ResolutionContext& context);
 
 }  // namespace ubcm

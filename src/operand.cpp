@@ -1,5 +1,6 @@
 #include "ubcm/operand.hpp"
 
+#include <limits>
 #include <utility>
 
 namespace ubcm {
@@ -43,10 +44,10 @@ OperandResolver::OperandResolver(RegisterBank& registers, RegisterHandle procedu
                                  OperandResolvers resolvers)
     : registers_(&registers), procedure_(procedure), resolvers_(resolvers) {}
 
-OperandResult<RegisterHandle> OperandResolver::resolve_selector(
+OperandResult<RegisterAddress> OperandResolver::resolve_selector(
     const RegisterSelector& selector) const {
     if (selector.class_id == RegisterClass::procedure) {
-        return procedure_;
+        return RegisterAddress{procedure_, 0};
     }
     const NameResolver* resolver = nullptr;
     switch (selector.class_id) {
@@ -66,24 +67,23 @@ OperandResult<RegisterHandle> OperandResolver::resolve_selector(
         return std::unexpected(error(OperandErrorCode::unresolved_name,
                                      "register resolver is unavailable"));
     }
-    auto handle = resolver->resolve(selector.name);
-    if (!handle) {
-        return std::unexpected(from_register_error(handle.error()));
-    }
-    if (handle->class_id != selector.class_id) {
-        return std::unexpected(error(OperandErrorCode::invalid_reference,
-                                     "resolved register has the wrong class"));
-    }
-    return *handle;
+    auto address = resolver->resolve_address(selector.name);
+    if (!address) return std::unexpected(from_register_error(address.error()));
+    return *address;
 }
 
 OperandResult<RegisterAddress> OperandResolver::resolve_address(
     const EncodedRegisterAddress& address) const {
-    auto handle = resolve_selector(address.selector);
-    if (!handle) {
-        return std::unexpected(handle.error());
+    auto base = resolve_selector(address.selector);
+    if (!base) {
+        return std::unexpected(base.error());
     }
-    return RegisterAddress{*handle, address.bit_offset};
+    if (address.bit_offset > std::numeric_limits<std::uint64_t>::max() -
+                                 base->bit_offset) {
+        return std::unexpected(error(OperandErrorCode::invalid_reference,
+                                     "resolved register offset overflows"));
+    }
+    return RegisterAddress{base->handle, base->bit_offset + address.bit_offset};
 }
 
 OperandResult<ResolvedReference> OperandResolver::resolve_reference(
@@ -131,9 +131,15 @@ OperandResult<ResolvedReference> OperandResolver::resolve_reference_impl(
         return std::unexpected(error(OperandErrorCode::unresolved_name,
                                      "local register resolver is unavailable"));
     }
-    auto handle = resolvers_.local->resolve(foreign.local_name);
-    if (!handle) return std::unexpected(from_register_error(handle.error()));
-    const auto address = RegisterAddress{*handle, foreign.bit_offset};
+    auto base = resolvers_.local->resolve_address(foreign.local_name);
+    if (!base) return std::unexpected(from_register_error(base.error()));
+    if (foreign.bit_offset > std::numeric_limits<std::uint64_t>::max() -
+                                 base->bit_offset) {
+        return std::unexpected(error(OperandErrorCode::invalid_reference,
+                                     "foreign register offset overflows"));
+    }
+    const auto address = RegisterAddress{
+        base->handle, base->bit_offset + foreign.bit_offset};
     if (!foreign.indirect) {
         return ResolvedReference{std::nullopt, address};
     }
