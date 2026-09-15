@@ -1077,8 +1077,36 @@ void test_vm_core_builtin_effects() {
         activation.procedure = *procedure;
         activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
         ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
-        expect(vm.step().has_value() && registers.size(*target) == 7,
-               "resize builtin changes register size");
+        expect(vm.step().has_value() && registers.size(*target) == 7 &&
+                   registers.read({*target, 0}, 7)->to_bit_string() == "1010000",
+               "resize preserves data and zero-fills the extension");
+    }
+
+    {
+        ubcm::RegisterBank registers;
+        ubcm::NameResolver locals;
+        auto target_name = *ubcm::BitVector::from_bit_string("10");
+        const ubcm::RegisterHandle target{ubcm::RegisterClass::global, 100};
+        expect(locals.bind(target_name,
+                           ubcm::RegisterAddress{target, 17}).has_value(),
+               "bind absent resize target");
+        const ubcm::RegisterSelector selector{ubcm::RegisterClass::local,
+                                              target_name};
+        const ubcm::SourceOperand size{std::uint64_t{7}, 0, true};
+        auto program = ubcm::encode_register_selector(selector);
+        program.append(ubcm::encode_source(size));
+        program.push_back(true);
+        auto procedure = registers.create(ubcm::RegisterClass::procedure,
+                                          program, true);
+        const auto node_storage = install_branching_nodes(
+            registers, ubcm::BuiltinCommand::resize_register);
+        ubcm::ActivationRecord activation;
+        activation.procedure = *procedure;
+        activation.network_state = ubcm::RuntimeReference::at(node_storage.state, 0);
+        ubcm::VirtualMachine vm(registers, activation, {.local = &locals});
+        expect(vm.step() && registers.size(target) == 7 &&
+                   registers.read({target, 0}, 7)->to_bit_string() == "0000000",
+               "resize creates a zero-filled physical global register");
     }
 
     {

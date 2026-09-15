@@ -130,6 +130,31 @@ RegisterResult<void> RegisterBank::resize(RegisterHandle handle, std::uint64_t b
     return {};
 }
 
+RegisterResult<void> RegisterBank::resize_or_create(RegisterHandle handle,
+                                                     std::uint64_t bit_size) {
+    auto found = find(handle);
+    if (found) return resize(handle, bit_size);
+    if (found.error().code != RegisterError::Code::not_found) {
+        return std::unexpected(found.error());
+    }
+    if (bit_size == 0U) return {};
+    constexpr auto max_register_id = (std::uint64_t{1} << 62U) - 1U;
+    if (handle.class_id == RegisterClass::procedure || handle.id > max_register_id) {
+        return std::unexpected(error(RegisterError::Code::invalid_handle,
+                                      "cannot create the requested global register"));
+    }
+    try {
+        entries_.emplace(storage_handle(handle), Entry{BitVector(bit_size), false});
+    } catch (const std::exception&) {
+        return std::unexpected(error(RegisterError::Code::resource_exhausted,
+                                      "register creation failed"));
+    }
+    if (handle.id >= next_id_) {
+        next_id_ = handle.id + 1U;
+    }
+    return {};
+}
+
 RegisterResult<std::uint64_t> RegisterBank::size(RegisterHandle handle) const {
     const auto found = find(handle);
     if (!found) {

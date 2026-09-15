@@ -189,8 +189,10 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
                                                        const NodeReference& current,
                                                        const NodeReference& next) const {
     auto immutable = registers_->is_immutable(handle);
-    if (!immutable) return std::unexpected(register_error(immutable.error()));
-    if (*immutable) {
+    if (!immutable && immutable.error().code != RegisterError::Code::not_found) {
+        return std::unexpected(register_error(immutable.error()));
+    }
+    if (immutable && *immutable) {
         return std::unexpected(error(VmErrorCode::register_access,
                                      "register is immutable"));
     }
@@ -509,7 +511,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         if (!written) return std::unexpected(register_error(written.error()));
     }
     if (resize) {
-        auto resized = registers_->resize(resize->first, resize->second);
+        auto resized = registers_->resize_or_create(resize->first, resize->second);
         if (!resized) return std::unexpected(register_error(resized.error()));
     }
 

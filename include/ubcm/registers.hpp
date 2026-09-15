@@ -72,6 +72,8 @@ public:
     RegisterResult<void> erase(RegisterHandle handle);
     RegisterResult<void> resize(RegisterHandle handle, std::uint64_t bit_size,
                                 bool fill_value = false);
+    RegisterResult<void> resize_or_create(RegisterHandle handle,
+                                          std::uint64_t bit_size);
 
     [[nodiscard]] RegisterResult<std::uint64_t> size(RegisterHandle handle) const;
     [[nodiscard]] RegisterResult<BitVector> read(RegisterAddress address,
