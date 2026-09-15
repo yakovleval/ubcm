@@ -17,6 +17,29 @@ void append_uint(BitVector& bits, std::uint64_t value, int width) {
 
 }  // namespace
 
+BitVector encode_procedure(const ProcedureImage& procedure) {
+    auto bits = encode_bit_string(procedure.name);
+    bits.append(encode_bit_string(procedure.contents));
+    while (bits.size() % 8 != 0) bits.push_back(false);
+    return bits;
+}
+
+CodecResult<ProcedureImage> decode_procedure(const BitVector& bits) {
+    BitCursor cursor(bits);
+    auto name = decode_bit_string(cursor);
+    auto contents = decode_bit_string(cursor);
+    if (!name) return std::unexpected(name.error());
+    if (!contents) return std::unexpected(contents.error());
+    if (bits.size() % 8 != 0 || cursor.remaining() >= 8) {
+        return std::unexpected(error("invalid procedure file length"));
+    }
+    while (cursor.remaining() != 0) {
+        auto padding = cursor.read_bit();
+        if (!padding || *padding) return std::unexpected(error("invalid procedure padding"));
+    }
+    return ProcedureImage{std::move(*name), std::move(*contents)};
+}
+
 CodecResult<void> validate_program(const ProgramImage& program) {
     std::map<std::uint64_t, const ProgramRegister*> records;
     std::set<std::string> names;

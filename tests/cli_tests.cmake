@@ -1,0 +1,27 @@
+execute_process(COMMAND "${DEMO}" "${WORK_DIR}" RESULT_VARIABLE status)
+if(NOT status EQUAL 0)
+    message(FATAL_ERROR "demo generation failed")
+endif()
+
+function(check expected pattern)
+    execute_process(COMMAND "${CLI}" ${ARGN}
+        RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(NOT status EQUAL expected)
+        message(FATAL_ERROR "unexpected exit ${status}: ${output}${error}")
+    endif()
+    if(NOT "${output}${error}" MATCHES "${pattern}")
+        message(FATAL_ERROR "unexpected CLI output: ${output}${error}")
+    endif()
+endfunction()
+
+check(0 "halted after 2 steps.*register 2: 00000000010010000000000000000000"
+    "${WORK_DIR}/procedure.ubcp" "${WORK_DIR}/network.ubcm" --dump 2)
+check(0 "halted after 2 steps" "${WORK_DIR}/combined.ubcm")
+check(2 "step limit reached after 0 steps" "${WORK_DIR}/combined.ubcm" --steps 0)
+check(1 "cannot open" "${WORK_DIR}/missing.ubcm")
+check(1 "invalid unsigned number" "${WORK_DIR}/combined.ubcm" --steps -1)
+check(1 "invalid unsigned number" "${WORK_DIR}/combined.ubcm" --steps 18446744073709551616)
+check(1 "missing option value" --steps)
+check(1 "unknown option" --unknown)
+file(WRITE "${WORK_DIR}/invalid.ubcm" "not a container")
+check(1 "header" "${WORK_DIR}/invalid.ubcm")

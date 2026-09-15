@@ -21,6 +21,18 @@ ubcm::ProgramImage example() {
 
 void test_program() {
     const auto program = example();
+    const ubcm::ProcedureImage procedure{program.registers.back().name,
+                                         program.registers.back().contents};
+    auto procedure_bits = ubcm::encode_procedure(procedure);
+    expect(ubcm::decode_procedure(procedure_bits) == procedure,
+           "separate procedure round trip preserves bit length");
+    auto bad_procedure = procedure_bits;
+    bad_procedure.set(bad_procedure.size() - 1, true);
+    expect(!ubcm::decode_procedure(bad_procedure), "reject procedure padding");
+    bad_procedure = procedure_bits;
+    bad_procedure.append(ubcm::BitVector(8));
+    expect(!ubcm::decode_procedure(bad_procedure), "reject trailing procedure data");
+    expect(!ubcm::decode_procedure(procedure_bits.slice(0, 8)), "reject truncated procedure");
     auto bits = ubcm::encode_program(program);
     expect(bits.has_value(), "encode program");
     expect(ubcm::decode_program(*bits) == program, "container round trip");

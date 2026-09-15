@@ -46,6 +46,9 @@ add_executable(ubcm
 
 target_link_libraries(ubcm PRIVATE ubcm::vm)
 
+add_executable(ubcm_demo examples/make_demo.cpp)
+target_link_libraries(ubcm_demo PRIVATE ubcm::vm)
+
 if(BUILD_TESTING)
     add_executable(ubcm_unit_tests
         tests/unit_tests.cpp
@@ -57,4 +60,8 @@ if(BUILD_TESTING)
     add_executable(ubcm_program_tests tests/program_tests.cpp)
     target_link_libraries(ubcm_program_tests PRIVATE ubcm::vm)
     add_test(NAME ubcm.program COMMAND ubcm_program_tests)
+    add_test(NAME ubcm.cli COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:ubcm> -DDEMO=$<TARGET_FILE:ubcm_demo>
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_tests.cmake)
 endif()

@@ -31,6 +31,15 @@ struct LoadedProgram {
     NodeReference entry;
 };
 
+struct ProcedureImage {
+    BitVector name;
+    BitVector contents;
+    friend bool operator==(const ProcedureImage&, const ProcedureImage&) = default;
+};
+
+[[nodiscard]] BitVector encode_procedure(const ProcedureImage& procedure);
+[[nodiscard]] CodecResult<ProcedureImage> decode_procedure(const BitVector& bits);
+
 [[nodiscard]] CodecResult<void> validate_program(const ProgramImage& program);
 [[nodiscard]] CodecResult<BitVector> encode_program(const ProgramImage& program);
 [[nodiscard]] CodecResult<ProgramImage> decode_program(const BitVector& bits);
