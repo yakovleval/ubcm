@@ -242,7 +242,7 @@ void test_activation_records() {
     expect(encoded->bytes().size() == ubcm::activation_byte_size,
            "activation byte width");
     expect(encoded->bytes()[0] == 0x55 && encoded->bytes()[1] == 0x41 &&
-               encoded->bytes()[2] == 0x01 && encoded->bytes()[3] == 0x00,
+               encoded->bytes()[2] == 0x02 && encoded->bytes()[3] == 0x00,
            "activation header");
     expect(ubcm::decode_activation(*encoded) == activation,
            "activation round trip");
@@ -392,6 +392,30 @@ void test_vm_activation_stack() {
     expect(vm.activation_count() == 2 &&
                vm.current_activation().procedure_position == 7,
            "VM exposes the top activation");
+    auto root_storage = vm.activation_storage_at_depth(1);
+    auto current_storage = vm.activation_storage_at_depth(0);
+    auto stored_current = current_storage
+                              ? registers.read(
+                                    {current_storage->handle,
+                                     current_storage->bit_offset},
+                                    ubcm::activation_bit_size)
+                              : ubcm::RegisterResult<ubcm::BitVector>{
+                                    std::unexpected(ubcm::RegisterError{})};
+    auto decoded_current = stored_current
+                               ? ubcm::decode_activation(*stored_current)
+                               : ubcm::CodecResult<ubcm::ActivationRecord>{
+                                     std::unexpected(ubcm::CodecError{})};
+    expect(root_storage && current_storage && decoded_current &&
+               decoded_current->previous_activation == *root_storage,
+           "activation stack is linked through global registers");
+    decoded_current->procedure_position = 42;
+    auto modified_current = ubcm::encode_activation(*decoded_current);
+    expect(modified_current &&
+               registers.write({current_storage->handle,
+                                current_storage->bit_offset},
+                               *modified_current) &&
+               !vm.step() && vm.current_activation().procedure_position == 42,
+           "global activation storage is authoritative");
 
     bool rejected_empty_stack = false;
     try {

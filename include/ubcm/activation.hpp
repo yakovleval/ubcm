@@ -7,7 +7,7 @@
 namespace ubcm {
 
 inline constexpr std::uint16_t activation_magic = 0x5541;
-inline constexpr std::uint8_t activation_version = 1;
+inline constexpr std::uint8_t activation_version = 2;
 inline constexpr std::uint64_t activation_bit_size = 744;
 inline constexpr std::uint64_t activation_byte_size = activation_bit_size / 8;
 

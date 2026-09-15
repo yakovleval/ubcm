@@ -59,6 +59,20 @@ VirtualMachine::VirtualMachine(RegisterBank& registers,
     if (activations_.empty()) {
         throw std::invalid_argument("VM requires at least one activation");
     }
+    RuntimeReference previous;
+    for (auto& frame : activations_) {
+        frame.activation.previous_activation = previous;
+        auto encoded = encode_activation(frame.activation);
+        if (!encoded) {
+            throw std::invalid_argument("VM received an invalid activation record");
+        }
+        auto storage = registers_->create(RegisterClass::global, *encoded);
+        if (!storage) {
+            throw std::runtime_error("VM cannot allocate activation storage");
+        }
+        frame.storage = RuntimeReference::at(*storage, 0);
+        previous = frame.storage;
+    }
 }
 
 ActivationFrame& VirtualMachine::current_frame() noexcept {
@@ -86,6 +100,13 @@ VmResult<const ActivationRecord*> VirtualMachine::activation_at_depth(
     auto index = activation_index(depth);
     if (!index) return std::unexpected(index.error());
     return &activations_[*index].activation;
+}
+
+VmResult<RuntimeReference> VirtualMachine::activation_storage_at_depth(
+    std::uint64_t depth) const {
+    auto index = activation_index(depth);
+    if (!index) return std::unexpected(index.error());
+    return activations_[*index].storage;
 }
 
 std::size_t VirtualMachine::activation_count() const noexcept {
@@ -182,7 +203,8 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
     for (const auto& frame : activations_) {
         const auto& activation = frame.activation;
         if (bit_size == 0U &&
-            (handle == activation.procedure || handle == activation.network_state.handle ||
+            (handle == frame.storage.handle || handle == activation.procedure ||
+             handle == activation.network_state.handle ||
              handle == activation.result_register ||
              (!activation.local_resolver.null &&
               handle == activation.local_resolver.handle) ||
@@ -192,7 +214,8 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
                 VmErrorCode::invalid_state,
                 "cannot delete a register used by an active activation"));
         }
-        if (!fits(activation.network_state, runtime_reference_bit_size) ||
+        if (!fits(frame.storage, activation_bit_size) ||
+            !fits(activation.network_state, runtime_reference_bit_size) ||
             !fits(activation.local_resolver, node_bit_size) ||
             !fits(activation.previous_activation, activation_bit_size)) {
             return std::unexpected(error(
@@ -233,7 +256,32 @@ VmResult<StepResult> VirtualMachine::step() {
     }
 }
 
+VmResult<void> VirtualMachine::reload_activations() {
+    for (auto& frame : activations_) {
+        auto bits = registers_->read(
+            {frame.storage.handle, frame.storage.bit_offset}, activation_bit_size);
+        if (!bits) return std::unexpected(register_error(bits.error()));
+        auto activation = decode_activation(*bits);
+        if (!activation) return std::unexpected(codec_error(activation.error()));
+        frame.activation = std::move(*activation);
+    }
+    return {};
+}
+
+VmResult<void> VirtualMachine::persist_activation(std::size_t index) {
+    auto encoded = encode_activation(activations_[index].activation);
+    if (!encoded) return std::unexpected(codec_error(encoded.error()));
+    const auto& storage = activations_[index].storage;
+    auto written = registers_->write(
+        {storage.handle, storage.bit_offset}, *encoded);
+    if (!written) return std::unexpected(register_error(written.error()));
+    return {};
+}
+
 VmResult<StepResult> VirtualMachine::step_impl() {
+    if (auto reloaded = reload_activations(); !reloaded) {
+        return std::unexpected(reloaded.error());
+    }
     const auto owner_index = activations_.size() - 1U;
     const auto active_prefix = current_activation().prefix;
     auto read_index = owner_index;
@@ -485,6 +533,19 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         owner_activation.prefix = *next_prefix;
     } else if (active_prefix.kind != PrefixKind::none) {
         owner_activation.prefix = {};
+    }
+    if (read_index != modify_index && active_prefix.kind == PrefixKind::read) {
+        if (auto persisted = persist_activation(read_index); !persisted) {
+            return std::unexpected(persisted.error());
+        }
+    }
+    if (auto persisted = persist_activation(modify_index); !persisted) {
+        return std::unexpected(persisted.error());
+    }
+    if (owner_index != modify_index) {
+        if (auto persisted = persist_activation(owner_index); !persisted) {
+            return std::unexpected(persisted.error());
+        }
     }
     return StepResult{instruction->command, *instruction->branch, next,
                       modify_activation.procedure_position};

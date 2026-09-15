@@ -40,6 +40,7 @@ struct StepResult {
 struct ActivationFrame {
     ActivationRecord activation;
     OperandResolvers resolvers;
+    RuntimeReference storage;
 };
 
 class VirtualMachine {
@@ -51,6 +52,8 @@ public:
     [[nodiscard]] const ActivationRecord& current_activation() const noexcept;
     [[nodiscard]] VmResult<const ActivationRecord*> activation_at_depth(
         std::uint64_t depth) const;
+    [[nodiscard]] VmResult<RuntimeReference> activation_storage_at_depth(
+        std::uint64_t depth) const;
     [[nodiscard]] std::size_t activation_count() const noexcept;
     [[nodiscard]] VmResult<StepResult> step();
 
@@ -60,6 +63,8 @@ private:
     [[nodiscard]] VmResult<std::size_t> activation_index(
         std::uint64_t depth) const;
     [[nodiscard]] VmResult<StepResult> step_impl();
+    [[nodiscard]] VmResult<void> reload_activations();
+    [[nodiscard]] VmResult<void> persist_activation(std::size_t index);
     [[nodiscard]] VmResult<NodeReference> read_network_state(
         const ActivationRecord& activation) const;
     [[nodiscard]] VmResult<Node> read_node(const NodeReference& reference) const;
