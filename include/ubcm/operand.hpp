@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -42,8 +43,10 @@ struct ResolvedReference {
 
 class OperandResolver {
 public:
+    using ActivationLookup =
+        std::function<OperandResult<const NameResolver*>(std::uint64_t)>;
     OperandResolver(RegisterBank& registers, RegisterHandle procedure,
-                    OperandResolvers resolvers = {});
+                    OperandResolvers resolvers = {}, ActivationLookup lookup = {});
 
     [[nodiscard]] OperandResult<RegisterAddress> resolve_address(
         const EncodedRegisterAddress& address) const;
@@ -71,6 +74,7 @@ private:
     RegisterBank* registers_;
     RegisterHandle procedure_;
     OperandResolvers resolvers_;
+    ActivationLookup activation_lookup_;
 };
 
 }  // namespace ubcm

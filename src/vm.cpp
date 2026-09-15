@@ -244,7 +244,15 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
 }
 
 OperandResolver VirtualMachine::operand_resolver(const ActivationFrame& frame) const {
-    return OperandResolver(*registers_, frame.activation.procedure, frame.resolvers);
+    const auto index = static_cast<std::size_t>(&frame - activations_.data());
+    return OperandResolver(*registers_, frame.activation.procedure, frame.resolvers,
+        [this, index](std::uint64_t depth) -> OperandResult<const NameResolver*> {
+            if (depth > index) {
+                return std::unexpected(OperandError{OperandErrorCode::invalid_reference,
+                                                    "activation depth is out of range"});
+            }
+            return activations_[index - static_cast<std::size_t>(depth)].resolvers.local;
+        });
 }
 
 VmResult<StepResult> VirtualMachine::step() {

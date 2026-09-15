@@ -653,6 +653,94 @@ ubcm::NodeReference stored_node_reference(ubcm::RegisterBank& registers,
     return *reference;
 }
 
+void test_vm_foreign_references() {
+    for (bool indirect : {false, true}) {
+        for (bool prefixed : {false, true}) {
+            for (std::uint64_t depth : {0ULL, 1ULL, 2ULL, ~0ULL}) {
+                ubcm::RegisterBank registers;
+                std::array<ubcm::NameResolver, 3> locals;
+                const auto name = *ubcm::BitVector::from_bit_string("1");
+                const auto output_name = *ubcm::BitVector::from_bit_string("0");
+                auto output = *registers.create(ubcm::RegisterClass::global,
+                                                ubcm::BitVector(12));
+                for (std::size_t i = 0; i < locals.size(); ++i) {
+                    ubcm::BitVector bits(3);
+                    bits.append(indirect ? ubcm::encode_reference(std::uint64_t{5 + i})
+                                         : *ubcm::BitVector::from_bit_string(
+                                               i == 0 ? "101" : i == 1 ? "110" : "111"));
+                    auto handle = *registers.create(ubcm::RegisterClass::global, bits);
+                    expect(locals[i].bind(name, ubcm::RegisterAddress{handle, 2}) &&
+                               locals[i].bind(output_name,
+                                   ubcm::RegisterAddress{output, i * 3}),
+                           "bind foreign source and destination offsets");
+                }
+                const ubcm::SourceOperand source{
+                    ubcm::ForeignReference{depth, indirect, name, 1}, 3, false};
+                const ubcm::DestinationOperand destination{
+                    ubcm::ForeignReference{depth, false, output_name, 1}};
+                auto program = ubcm::encode_source(source);
+                program.append(ubcm::encode_destination(destination));
+                program.push_back(true);
+                auto procedure = *registers.create(ubcm::RegisterClass::global,
+                                                   program, true);
+                const auto nodes = install_branching_nodes(registers,
+                                                           ubcm::BuiltinCommand::copy);
+                ubcm::ActivationRecord record;
+                record.procedure = procedure;
+                record.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+                std::vector<ubcm::ActivationFrame> frames;
+                for (auto& local : locals) frames.push_back({record, {.local = &local}});
+                if (prefixed) frames.back().activation.prefix =
+                    {ubcm::PrefixKind::read, 1, false};
+                ubcm::VirtualMachine vm(registers, std::move(frames));
+                const auto before = **registers.view(nodes.state);
+                auto result = vm.step();
+                const std::uint64_t source_index = prefixed ? 1 : 2;
+                if (depth > source_index) {
+                    expect(!result && **registers.view(nodes.state) == before &&
+                               **registers.view(output) == ubcm::BitVector(12),
+                           "foreign depth failure preserves registers and network state");
+                } else {
+                    const auto expected = source_index - depth == 0 ? "101"
+                        : source_index - depth == 1 ? "110" : "111";
+                    expect(result &&
+                               registers.read({output, (2 - depth) * 3 + 1}, 3)
+                                   ->to_bit_string() == expected,
+                           "foreign read and write use their activation contexts and offsets");
+                }
+            }
+        }
+    }
+}
+
+void test_foreign_reference_errors() {
+    ubcm::RegisterBank registers;
+    ubcm::NameResolver locals;
+    const auto name = *ubcm::BitVector::from_bit_string("1");
+    const ubcm::ForeignReference reference{1, true, name, 0};
+    auto pointer = *registers.create(ubcm::RegisterClass::global,
+                                    ubcm::encode_reference(reference));
+    expect(locals.bind(name, pointer).has_value(), "bind cyclic foreign pointer");
+    ubcm::OperandResolver resolver(registers, {},
+        {}, [&locals](std::uint64_t) -> ubcm::OperandResult<const ubcm::NameResolver*> {
+            return &locals;
+        });
+    auto cycle = resolver.resolve_reference(reference);
+    expect(!cycle && cycle.error().code == ubcm::OperandErrorCode::invalid_reference,
+           "foreign indirection cycles respect the common recursion limit");
+    expect(locals.unbind(name).has_value(), "unbind foreign name");
+    expect(!resolver.resolve_reference(reference), "missing foreign name fails");
+    expect(locals.bind(name, ubcm::RegisterAddress{
+               pointer, std::numeric_limits<std::uint64_t>::max()}).has_value(),
+           "bind large foreign offset");
+    auto overflowing = reference;
+    overflowing.bit_offset = 1;
+    expect(!resolver.resolve_reference(overflowing), "foreign offset addition cannot wrap");
+    ubcm::OperandResolver no_context(registers, {});
+    expect(!no_context.resolve_reference(reference),
+           "foreign reference requires an activation context");
+}
+
 void test_vm_activation_chain() {
     for (const std::string_view scenario : {
              "skip", "external", "null", "self", "cycle", "deleted",
@@ -1485,6 +1573,8 @@ int main() {
         {"vm_branch_step", test_vm_branch_step},
         {"vm_activation_stack", test_vm_activation_stack},
         {"vm_activation_chain", test_vm_activation_chain},
+        {"vm_foreign_references", test_vm_foreign_references},
+        {"foreign_reference_errors", test_foreign_reference_errors},
         {"operand_resolution", test_operand_resolution},
         {"indirect_reference_limits", test_indirect_reference_limits},
         {"vm_prefix_commands", test_vm_prefix_commands},

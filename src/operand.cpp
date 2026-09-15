@@ -41,8 +41,9 @@ BitVector immediate_bits(std::uint64_t value) {
 }  // namespace
 
 OperandResolver::OperandResolver(RegisterBank& registers, RegisterHandle procedure,
-                                 OperandResolvers resolvers)
-    : registers_(&registers), procedure_(procedure), resolvers_(resolvers) {}
+                                 OperandResolvers resolvers, ActivationLookup lookup)
+    : registers_(&registers), procedure_(procedure), resolvers_(resolvers),
+      activation_lookup_(std::move(lookup)) {}
 
 OperandResult<RegisterAddress> OperandResolver::resolve_selector(
     const RegisterSelector& selector) const {
@@ -123,15 +124,21 @@ OperandResult<ResolvedReference> OperandResolver::resolve_reference_impl(
     }
 
     const auto& foreign = std::get<ForeignReference>(reference);
+    const NameResolver* local = resolvers_.local;
     if (foreign.depth != 0U) {
-        return std::unexpected(error(OperandErrorCode::unsupported_reference,
-                                     "foreign activation references are not active yet"));
+        if (!activation_lookup_) {
+            return std::unexpected(error(OperandErrorCode::unsupported_reference,
+                                         "activation context is unavailable"));
+        }
+        auto resolver = activation_lookup_(foreign.depth);
+        if (!resolver) return std::unexpected(resolver.error());
+        local = *resolver;
     }
-    if (resolvers_.local == nullptr) {
+    if (local == nullptr) {
         return std::unexpected(error(OperandErrorCode::unresolved_name,
                                      "local register resolver is unavailable"));
     }
-    auto base = resolvers_.local->resolve_address(foreign.local_name);
+    auto base = local->resolve_address(foreign.local_name);
     if (!base) return std::unexpected(from_register_error(base.error()));
     if (foreign.bit_offset > std::numeric_limits<std::uint64_t>::max() -
                                  base->bit_offset) {
