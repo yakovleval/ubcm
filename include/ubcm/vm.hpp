@@ -41,6 +41,11 @@ struct StepResult {
     bool halted{};
 };
 
+struct RunResult {
+    std::uint64_t steps{};
+    bool halted{};
+};
+
 struct ActivationFrame {
     ActivationRecord activation;
     OperandResolvers resolvers;
@@ -62,7 +67,9 @@ public:
     [[nodiscard]] VmResult<RuntimeReference> activation_storage_at_depth(
         std::uint64_t depth) const;
     [[nodiscard]] std::size_t activation_count() const noexcept;
-    [[nodiscard]] VmResult<StepResult> step();
+    [[nodiscard]] VmResult<StepResult> step(std::uint64_t max_activation_depth = 256);
+    [[nodiscard]] VmResult<RunResult> run(std::uint64_t max_steps = 1000000,
+                                         std::uint64_t max_activation_depth = 256);
 
 private:
     [[nodiscard]] ActivationFrame& current_frame() noexcept;

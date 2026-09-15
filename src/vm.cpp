@@ -267,7 +267,18 @@ OperandResolver VirtualMachine::operand_resolver(const ActivationFrame& frame) c
         });
 }
 
-VmResult<StepResult> VirtualMachine::step() {
+VmResult<RunResult> VirtualMachine::run(std::uint64_t max_steps,
+                                       std::uint64_t max_activation_depth) {
+    std::uint64_t steps = 0;
+    while (!halted() && steps < max_steps) {
+        auto result = step(max_activation_depth);
+        if (!result) return std::unexpected(result.error());
+        ++steps;
+    }
+    return RunResult{steps, halted()};
+}
+
+VmResult<StepResult> VirtualMachine::step(std::uint64_t max_activation_depth) {
     try {
         // Include late activation writes and allocation failures in the same
         // transaction. Only the non-throwing swaps publish a successful step.
@@ -276,6 +287,10 @@ VmResult<StepResult> VirtualMachine::step() {
         staged_vm.registers_ = &staged_registers;
         auto result = staged_vm.step_impl();
         if (!result) return result;
+        if (staged_vm.activation_count() > max_activation_depth) {
+            return std::unexpected(error(VmErrorCode::resource_exhausted,
+                                         "activation depth limit exceeded"));
+        }
         registers_->swap(staged_registers);
         activations_.swap(staged_vm.activations_);
         resolvers_.swap(staged_vm.resolvers_);

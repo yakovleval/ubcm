@@ -653,6 +653,53 @@ ubcm::NodeReference stored_node_reference(ubcm::RegisterBank& registers,
     return *reference;
 }
 
+void test_vm_run_limits() {
+    ubcm::RegisterBank registers;
+    auto program = ubcm::encode_source({std::uint64_t{0}, 0, true});
+    program.push_back(true);
+    auto procedure = *registers.create(ubcm::RegisterClass::global, program, true);
+    const auto nodes = install_branching_nodes(
+        registers, ubcm::BuiltinCommand::set_procedure_position);
+    ubcm::Node loop;
+    loop.command = static_cast<std::uint8_t>(ubcm::BuiltinCommand::set_procedure_position);
+    loop.next1 = ubcm::RuntimeReference::at(nodes.nodes, 0);
+    expect(registers.write({nodes.nodes, 0}, *ubcm::encode_node(loop)).has_value(),
+           "install bounded loop");
+    ubcm::ActivationRecord activation;
+    activation.procedure = procedure;
+    activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+    ubcm::VirtualMachine vm(registers, activation);
+    auto zero = vm.run(0);
+    auto first = vm.run(3);
+    auto resumed = vm.run(2);
+    expect(zero && zero->steps == 0 && !zero->halted &&
+               first && first->steps == 3 && !first->halted &&
+               resumed && resumed->steps == 2 && !resumed->halted,
+           "step budget pauses a loop and allows resuming");
+    loop.kind = ubcm::NodeKind::procedure_call;
+    loop.command = 0;
+    loop.procedure = procedure;
+    loop.entry = loop.next1;
+    loop.next0 = loop.next1;
+    expect(registers.write({nodes.nodes, 0}, *ubcm::encode_node(loop)).has_value(),
+           "install recursive call");
+    expect(vm.step(2) && vm.activation_count() == 2, "call at depth limit succeeds");
+    const auto before = vm.current_activation();
+    auto overflow = vm.step(2);
+    expect(!overflow && overflow.error().code == ubcm::VmErrorCode::resource_exhausted &&
+               vm.activation_count() == 2 && vm.current_activation() == before,
+           "depth limit rolls back the rejected recursive call");
+    ubcm::Node finish;
+    finish.command = static_cast<std::uint8_t>(ubcm::BuiltinCommand::finish_call);
+    expect(registers.write({nodes.nodes, 0}, *ubcm::encode_node(finish)).has_value(),
+           "replace recursive node with finish");
+    auto done = vm.run(2);
+    auto again = vm.run(2);
+    expect(done && done->steps == 2 && done->halted &&
+               again && again->steps == 0 && again->halted,
+           "run reports exact halt and is harmless after halt");
+}
+
 void test_vm_nested_calls() {
     ubcm::RegisterBank registers;
     ubcm::NameResolver globals;
@@ -1801,6 +1848,7 @@ int main() {
         {"vm_activation_stack", test_vm_activation_stack},
         {"vm_activation_chain", test_vm_activation_chain},
         {"vm_nested_calls", test_vm_nested_calls},
+        {"vm_run_limits", test_vm_run_limits},
         {"vm_builtin_calls", test_vm_builtin_calls},
         {"vm_call_edges", test_vm_call_edges},
         {"vm_foreign_references", test_vm_foreign_references},
