@@ -39,6 +39,24 @@ int main(int argc, char** argv) {
         save(directory / "procedure.ubcp", ubcm::encode_procedure({name, code}));
         image.registers[0].contents = code;
         save(directory / "combined.ubcm", *ubcm::encode_program(image));
+        auto handler = ubcm::encode_source({std::uint64_t{2}, 0, true});
+        handler.append(ubcm::encode_source({std::uint64_t{0}, 0, true}));
+        ubcm::Node resolve;
+        resolve.command = static_cast<std::uint8_t>(ubcm::BuiltinCommand::resolve_return);
+        ubcm::Node call;
+        call.kind = ubcm::NodeKind::procedure_call;
+        call.procedure = {ubcm::RegisterClass::global, 3};
+        call.entry = ubcm::RuntimeReference::at({ubcm::RegisterClass::global, 4},
+                                               ubcm::node_bit_size);
+        call.next0 = ubcm::RuntimeReference::at({ubcm::RegisterClass::global, 4},
+                                               ubcm::node_bit_size * 2);
+        auto resolver_nodes = *ubcm::encode_node(call);
+        resolver_nodes.append(*ubcm::encode_node(resolve));
+        resolver_nodes.append(*ubcm::encode_node(finish));
+        image.registers.push_back({3, 1, *ubcm::BitVector::from_bit_string("01001000"), handler});
+        image.registers.push_back({4, 2, *ubcm::BitVector::from_bit_string("01010011"),
+                                    resolver_nodes});
+        save(directory / "resolver.ubcm", *ubcm::encode_program(image));
         std::cout << "example: 5 + 3, result in global register 2\n";
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

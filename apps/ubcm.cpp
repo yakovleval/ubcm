@@ -34,6 +34,17 @@ ubcm::BitVector read_file(const std::string& path) {
     return std::move(*bits);
 }
 
+ubcm::NodeReference node_address(std::string_view text) {
+    const auto colon = text.find(':');
+    if (colon == text.npos) throw std::runtime_error("expected resolver ID:BIT_OFFSET");
+    const auto id = number(text.substr(0, colon));
+    const auto offset = number(text.substr(colon + 1));
+    if (id >= (std::uint64_t{1} << 62) || offset % ubcm::node_bit_size != 0) {
+        throw std::runtime_error("invalid resolver node address");
+    }
+    return ubcm::RuntimeReference::at({ubcm::RegisterClass::global, id}, offset);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -45,14 +56,21 @@ int main(int argc, char** argv) {
         std::vector<std::string> paths;
         std::uint64_t steps = 1000000, depth = 256;
         std::optional<std::uint64_t> dump;
+        ubcm::NodeReference global_resolver, local_resolver;
         for (int i = 1; i < argc; ++i) {
             const std::string_view arg = argv[i];
             if (arg == "--help") {
                 std::cout << "ubcm [procedure.ubcp] network.ubcm "
-                             "[--steps N] [--depth N] [--dump ID]\n";
+                             "[--steps N] [--depth N] [--dump ID] "
+                             "[--global-resolver ID:OFFSET] [--local-resolver ID:OFFSET]\n";
                 return 0;
             }
-            if (arg == "--steps" || arg == "--depth" || arg == "--dump") {
+            if (arg == "--global-resolver" || arg == "--local-resolver") {
+                if (++i == argc) throw std::runtime_error("missing resolver address");
+                const auto ref = node_address(argv[i]);
+                if (arg == "--global-resolver") global_resolver = ref;
+                else local_resolver = ref;
+            } else if (arg == "--steps" || arg == "--depth" || arg == "--dump") {
                 if (++i == argc) throw std::runtime_error("missing option value");
                 const auto value = number(argv[i]);
                 if (arg == "--steps") steps = value;
@@ -86,7 +104,17 @@ int main(int argc, char** argv) {
         ubcm::ActivationRecord activation;
         activation.procedure = loaded->procedure;
         activation.network_state = ubcm::RuntimeReference::at(*state, 0);
+        activation.local_resolver = local_resolver;
+        if (!local_resolver.null) {
+            auto bits = loaded->registers.read({local_resolver.handle, local_resolver.bit_offset},
+                                               ubcm::node_bit_size);
+            if (!bits || !ubcm::decode_node(*bits)) {
+                throw std::runtime_error("invalid local resolver node");
+            }
+        }
         ubcm::VirtualMachine vm(loaded->registers, activation, {.global = &loaded->names});
+        auto configured = vm.set_global_resolver(global_resolver);
+        if (!configured) throw std::runtime_error(configured.error().message);
         auto result = vm.run(steps, depth);
         if (!result) throw std::runtime_error(result.error().message);
         std::cout << (result->halted ? "halted" : "step limit reached")

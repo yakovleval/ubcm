@@ -17,6 +17,11 @@ endfunction()
 check(0 "halted after 2 steps.*register 2: 00000000010010000000000000000000"
     "${WORK_DIR}/procedure.ubcp" "${WORK_DIR}/network.ubcm" --dump 2)
 check(0 "halted after 2 steps" "${WORK_DIR}/combined.ubcm")
+check(0 "halted after 2 steps.*register 2: 00000000010010000000000000000000"
+    "${WORK_DIR}/resolver.ubcm" --global-resolver 4:0 --dump 2)
+check(1 "expected resolver" "${WORK_DIR}/resolver.ubcm" --global-resolver invalid)
+check(1 "invalid resolver" "${WORK_DIR}/resolver.ubcm" --global-resolver 4:1)
+check(1 "register does not exist" "${WORK_DIR}/resolver.ubcm" --global-resolver 999:0)
 check(2 "step limit reached after 0 steps" "${WORK_DIR}/combined.ubcm" --steps 0)
 check(1 "cannot open" "${WORK_DIR}/missing.ubcm")
 check(1 "invalid unsigned number" "${WORK_DIR}/combined.ubcm" --steps -1)
