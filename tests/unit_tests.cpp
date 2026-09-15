@@ -825,11 +825,15 @@ void test_vm_prefix_application() {
         };
         ubcm::VirtualMachine vm(registers, std::move(activations));
         expect(vm.step().has_value(), "execute read prefix");
+        const auto owner_position = vm.current_activation().procedure_position;
         auto step = vm.step();
+        auto root_after = vm.activation_at_depth(1);
         expect(step &&
                    registers.read({*root_target, 0}, 5)->to_bit_string() == "00000" &&
                    registers.read({*current_target, 0}, 5)->to_bit_string() == "10100" &&
-                   vm.current_activation().procedure_position == root_program.size() &&
+                   vm.current_activation().procedure_position == owner_position &&
+                   root_after &&
+                   (*root_after)->procedure_position == root_program.size() &&
                    vm.current_activation().prefix.kind == ubcm::PrefixKind::none &&
                    stored_node_reference(registers, nodes.state) == nodes.references[2],
                "read prefix uses foreign procedure and current write context");

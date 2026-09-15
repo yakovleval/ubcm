@@ -49,6 +49,8 @@ public:
     VirtualMachine(RegisterBank& registers, std::vector<ActivationFrame> activations);
 
     [[nodiscard]] const ActivationRecord& current_activation() const noexcept;
+    [[nodiscard]] VmResult<const ActivationRecord*> activation_at_depth(
+        std::uint64_t depth) const;
     [[nodiscard]] std::size_t activation_count() const noexcept;
     [[nodiscard]] VmResult<StepResult> step();
 

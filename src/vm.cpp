@@ -81,6 +81,13 @@ const ActivationRecord& VirtualMachine::current_activation() const noexcept {
     return current_frame().activation;
 }
 
+VmResult<const ActivationRecord*> VirtualMachine::activation_at_depth(
+    std::uint64_t depth) const {
+    auto index = activation_index(depth);
+    if (!index) return std::unexpected(index.error());
+    return &activations_[*index].activation;
+}
+
 std::size_t VirtualMachine::activation_count() const noexcept {
     return activations_.size();
 }
@@ -305,7 +312,8 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     std::optional<PreparedWrite> data_write;
     std::optional<std::pair<RegisterHandle, std::uint64_t>> resize;
     std::optional<PrefixState> next_prefix;
-    auto next_position = instruction->next_procedure_position;
+    const auto decoded_position = instruction->next_procedure_position;
+    std::optional<std::uint64_t> explicit_position;
     const auto suppress_effect = active_prefix.kind == PrefixKind::condition &&
                                  !active_prefix.condition;
 
@@ -392,7 +400,7 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                 return std::unexpected(error(VmErrorCode::invalid_state,
                                              "new procedure position is out of range"));
             }
-            next_position = *position;
+            explicit_position = *position;
             break;
         }
         case BuiltinCommand::resize_register: {
@@ -442,7 +450,8 @@ VmResult<StepResult> VirtualMachine::step_impl() {
                                          "builtin effect belongs to a later VM stage"));
     }
 
-    if (next_position > (*modified_procedure)->size()) {
+    if (active_prefix.kind != PrefixKind::read &&
+        explicit_position.value_or(decoded_position) > (*modified_procedure)->size()) {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "new procedure position is out of range"));
     }
@@ -463,7 +472,15 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     if (!written) {
         return std::unexpected(register_error(written.error()));
     }
-    modify_activation.procedure_position = next_position;
+    if (active_prefix.kind == PrefixKind::read) {
+        read_frame.activation.procedure_position = decoded_position;
+        if (explicit_position) {
+            modify_activation.procedure_position = *explicit_position;
+        }
+    } else {
+        modify_activation.procedure_position =
+            explicit_position.value_or(decoded_position);
+    }
     if (next_prefix) {
         owner_activation.prefix = *next_prefix;
     } else if (active_prefix.kind != PrefixKind::none) {
