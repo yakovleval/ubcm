@@ -81,6 +81,7 @@ public:
     [[nodiscard]] RegisterResult<BitVector> read(RegisterAddress address,
                                                   std::uint64_t bit_count) const;
     RegisterResult<void> write(RegisterAddress address, const BitVector& value);
+    RegisterResult<void> replace(RegisterHandle handle, const BitVector& value);
     [[nodiscard]] RegisterResult<const BitVector*> view(RegisterHandle handle) const;
     [[nodiscard]] RegisterResult<bool> is_immutable(RegisterHandle handle) const;
 

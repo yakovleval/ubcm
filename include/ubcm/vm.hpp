@@ -33,10 +33,12 @@ template <typename T>
 using VmResult = std::expected<T, VmError>;
 
 struct StepResult {
-    BuiltinCommand command{};
+    std::optional<BuiltinCommand> command;
     bool branch{};
     NodeReference next_node{};
     std::uint64_t procedure_position{};
+    bool called{};
+    bool halted{};
 };
 
 struct ActivationFrame {
@@ -53,7 +55,8 @@ public:
 
     // These accessors expose the snapshot from construction or the last
     // successful step. Each step rebuilds it from the stored activation chain.
-    [[nodiscard]] const ActivationRecord& current_activation() const noexcept;
+    [[nodiscard]] const ActivationRecord& current_activation() const;
+    [[nodiscard]] bool halted() const noexcept;
     [[nodiscard]] VmResult<const ActivationRecord*> activation_at_depth(
         std::uint64_t depth) const;
     [[nodiscard]] VmResult<RuntimeReference> activation_storage_at_depth(
@@ -69,6 +72,9 @@ private:
     [[nodiscard]] VmResult<StepResult> step_impl();
     [[nodiscard]] VmResult<void> reload_activations();
     [[nodiscard]] VmResult<void> persist_activation(std::size_t index);
+    [[nodiscard]] VmResult<void> enter_call(RegisterHandle procedure,
+        std::optional<NodeReference> entry, bool owns_procedure = false);
+    [[nodiscard]] VmResult<StepResult> finish_call();
     [[nodiscard]] VmResult<NodeReference> read_network_state(
         const ActivationRecord& activation) const;
     [[nodiscard]] VmResult<Node> read_node(const NodeReference& reference) const;
@@ -85,6 +91,7 @@ private:
     RegisterBank* registers_;
     RuntimeReference current_storage_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, OperandResolvers> resolvers_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::vector<RegisterHandle>> owned_;
     std::vector<ActivationFrame> activations_;
 };
 

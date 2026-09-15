@@ -63,6 +63,9 @@ VirtualMachine::VirtualMachine(RegisterBank& registers,
     }
     RuntimeReference previous;
     for (auto& frame : activations_) {
+        auto result = registers_->create(RegisterClass::global, BitVector{});
+        if (!result) throw std::runtime_error("VM cannot allocate result storage");
+        frame.activation.result_register = *result;
         frame.activation.previous_activation = previous;
         auto encoded = encode_activation(frame.activation);
         if (!encoded) {
@@ -74,6 +77,7 @@ VirtualMachine::VirtualMachine(RegisterBank& registers,
         }
         frame.storage = RuntimeReference::at(*storage, 0);
         resolvers_[{storage->id, 0}] = frame.resolvers;
+        owned_[{storage->id, 0}] = {*result, *storage};
         previous = frame.storage;
     }
     current_storage_ = previous;
@@ -95,9 +99,12 @@ VmResult<std::size_t> VirtualMachine::activation_index(std::uint64_t depth) cons
     return activations_.size() - 1U - static_cast<std::size_t>(depth);
 }
 
-const ActivationRecord& VirtualMachine::current_activation() const noexcept {
+const ActivationRecord& VirtualMachine::current_activation() const {
+    if (halted()) throw std::logic_error("VM has halted");
     return current_frame().activation;
 }
+
+bool VirtualMachine::halted() const noexcept { return current_storage_.null; }
 
 VmResult<const ActivationRecord*> VirtualMachine::activation_at_depth(
     std::uint64_t depth) const {
@@ -245,13 +252,18 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
 
 OperandResolver VirtualMachine::operand_resolver(const ActivationFrame& frame) const {
     const auto index = static_cast<std::size_t>(&frame - activations_.data());
-    return OperandResolver(*registers_, frame.activation.procedure, frame.resolvers,
-        [this, index](std::uint64_t depth) -> OperandResult<const NameResolver*> {
+    auto context = frame.resolvers;
+    context.result = frame.activation.result_register;
+    return OperandResolver(*registers_, frame.activation.procedure, context,
+        [this, index](std::uint64_t depth) -> OperandResult<OperandResolvers> {
             if (depth > index) {
                 return std::unexpected(OperandError{OperandErrorCode::invalid_reference,
                                                     "activation depth is out of range"});
             }
-            return activations_[index - static_cast<std::size_t>(depth)].resolvers.local;
+            const auto& target = activations_[index - static_cast<std::size_t>(depth)];
+            auto result = target.resolvers;
+            result.result = target.activation.result_register;
+            return result;
         });
 }
 
@@ -266,6 +278,9 @@ VmResult<StepResult> VirtualMachine::step() {
         if (!result) return result;
         registers_->swap(staged_registers);
         activations_.swap(staged_vm.activations_);
+        resolvers_.swap(staged_vm.resolvers_);
+        owned_.swap(staged_vm.owned_);
+        current_storage_ = staged_vm.current_storage_;
         return result;
     } catch (const std::bad_alloc&) {
         return std::unexpected(error(VmErrorCode::resource_exhausted,
@@ -320,7 +335,101 @@ VmResult<void> VirtualMachine::persist_activation(std::size_t index) {
     return {};
 }
 
+VmResult<void> VirtualMachine::enter_call(RegisterHandle procedure,
+    std::optional<NodeReference> entry, bool owns_procedure) {
+    auto immutable = registers_->is_immutable(procedure);
+    if (!immutable) return std::unexpected(register_error(immutable.error()));
+    if (!*immutable) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "called procedure must be immutable"));
+    }
+    if (entry) {
+        if (auto valid = validate_node_target(*entry); !valid) return valid;
+    }
+    ActivationRecord activation;
+    activation.procedure = procedure;
+    activation.previous_activation = current_storage_;
+    activation.network_state = current_activation().network_state;
+    activation.local_resolver = current_activation().local_resolver;
+    auto context = current_frame().resolvers;
+    std::vector<RegisterHandle> owned;
+    if (owns_procedure) owned.push_back(procedure);
+    if (entry) {
+        auto bits = encode_runtime_reference(*entry);
+        if (!bits) return std::unexpected(codec_error(bits.error()));
+        auto state = registers_->create(RegisterClass::global, *bits);
+        if (!state) return std::unexpected(register_error(state.error()));
+        activation.network_state = RuntimeReference::at(*state, 0);
+        owned.push_back(*state);
+    }
+    auto result = registers_->create(RegisterClass::global, BitVector{});
+    if (!result) return std::unexpected(register_error(result.error()));
+    activation.result_register = *result;
+    owned.push_back(*result);
+    auto bits = encode_activation(activation);
+    if (!bits) return std::unexpected(codec_error(bits.error()));
+    auto storage = registers_->create(RegisterClass::global, *bits);
+    if (!storage) return std::unexpected(register_error(storage.error()));
+    owned.push_back(*storage);
+    current_storage_ = RuntimeReference::at(*storage, 0);
+    resolvers_[{storage->id, 0}] = context;
+    owned_[{storage->id, 0}] = std::move(owned);
+    activations_.push_back({activation, context, current_storage_});
+    return {};
+}
+
+VmResult<StepResult> VirtualMachine::finish_call() {
+    const auto storage = current_storage_;
+    const auto previous = current_activation().previous_activation;
+    activations_.pop_back();
+    NodeReference next;
+    std::uint64_t position = 0;
+    if (!previous.null) {
+        auto state = read_network_state(activations_.back().activation);
+        if (!state) return std::unexpected(state.error());
+        next = *state;
+        if (auto valid = validate_node_target(next); !valid) {
+            return std::unexpected(valid.error());
+        }
+        position = activations_.back().activation.procedure_position;
+    }
+    const auto key = std::pair{storage.handle.id, storage.bit_offset};
+    if (auto owned = owned_.find(key); owned != owned_.end()) {
+        for (auto handle : owned->second) {
+            // Shared procedure/network registers belong to the caller.
+            // Reject cleanup if a surviving activation now refers to our storage.
+            if (!previous.null) {
+                // Read-only owned procedures may still be deleted at end of life;
+                // check references without treating this as a resize operation.
+                for (const auto& frame : activations_) {
+                    const auto& a = frame.activation;
+                    auto node = read_network_state(a);
+                    if (!node) return std::unexpected(node.error());
+                    if (handle == frame.storage.handle || handle == a.procedure ||
+                        handle == a.result_register ||
+                        (!a.network_state.null && handle == a.network_state.handle) ||
+                        (!a.local_resolver.null && handle == a.local_resolver.handle) ||
+                        handle == node->handle) {
+                        return std::unexpected(error(VmErrorCode::invalid_state,
+                                                     "call storage is still in use"));
+                    }
+                }
+            }
+            auto erased = registers_->erase(handle);
+            if (!erased) return std::unexpected(register_error(erased.error()));
+        }
+        owned_.erase(owned);
+    }
+    resolvers_.erase(key);
+    current_storage_ = previous;
+    return StepResult{BuiltinCommand::finish_call, false, next, position, false,
+                      previous.null};
+}
+
 VmResult<StepResult> VirtualMachine::step_impl() {
+    if (halted()) {
+        return std::unexpected(error(VmErrorCode::invalid_state, "VM has halted"));
+    }
     if (auto reloaded = reload_activations(); !reloaded) {
         return std::unexpected(reloaded.error());
     }
@@ -352,8 +461,19 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         return std::unexpected(node.error());
     }
     if (node->kind != NodeKind::builtin) {
-        return std::unexpected(error(VmErrorCode::unsupported_command,
-                                     "procedure calls belong to the next VM stage"));
+        if (auto valid = validate_node_target(node->next0); !valid) {
+            return std::unexpected(valid.error());
+        }
+        auto next_bits = encode_runtime_reference(node->next0);
+        if (!next_bits) return std::unexpected(codec_error(next_bits.error()));
+        auto written = registers_->write(
+            {owner_activation.network_state.handle, owner_activation.network_state.bit_offset},
+            *next_bits);
+        if (!written) return std::unexpected(register_error(written.error()));
+        const auto position = owner_activation.procedure_position;
+        auto called = enter_call(node->procedure, node->entry);
+        if (!called) return std::unexpected(called.error());
+        return StepResult{std::nullopt, false, node->entry, position, true};
     }
 
     auto procedure = registers_->view(read_frame.activation.procedure);
@@ -377,9 +497,26 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         return std::unexpected(error(VmErrorCode::invalid_state,
                                      "cannot combine active prefixes"));
     }
-    if (!instruction->branch) {
-        return std::unexpected(error(VmErrorCode::unsupported_command,
-                                     "builtin command has no branch transition yet"));
+    const bool call_command =
+        instruction->command == BuiltinCommand::switch_procedure ||
+        instruction->command == BuiltinCommand::switch_network ||
+        instruction->command == BuiltinCommand::switch_procedure_and_network ||
+        instruction->command == BuiltinCommand::finish_call;
+    if (call_command && active_prefix.kind == PrefixKind::modify &&
+        active_prefix.depth != 0) {
+        return std::unexpected(error(VmErrorCode::invalid_state,
+                                     "call control requires modify depth zero"));
+    }
+    if (instruction->command == BuiltinCommand::finish_call) {
+        if (active_prefix.kind == PrefixKind::condition && !active_prefix.condition) {
+            owner_activation.prefix = {};
+            if (auto saved = persist_activation(owner_index); !saved) {
+                return std::unexpected(saved.error());
+            }
+            return StepResult{BuiltinCommand::finish_call, false, *current_reference,
+                              owner_activation.procedure_position};
+        }
+        return finish_call();
     }
     const auto next = *instruction->branch ? node->next1 : node->next0;
     if (auto valid = validate_node_target(next); !valid) {
@@ -402,6 +539,9 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     std::optional<PreparedWrite> data_write;
     std::optional<std::pair<RegisterHandle, std::uint64_t>> resize;
     std::optional<PrefixState> next_prefix;
+    std::optional<RegisterHandle> called_procedure;
+    std::optional<NodeReference> called_entry;
+    bool owns_procedure = false;
     const auto decoded_position = instruction->next_procedure_position;
     std::optional<std::uint64_t> explicit_position;
     const auto suppress_effect = active_prefix.kind == PrefixKind::condition &&
@@ -431,6 +571,65 @@ VmResult<StepResult> VirtualMachine::step_impl() {
         }
         case BuiltinCommand::branch:
             break;
+        case BuiltinCommand::switch_procedure:
+        case BuiltinCommand::switch_network:
+        case BuiltinCommand::switch_procedure_and_network: {
+            called_procedure = read_frame.activation.procedure;
+            if (instruction->command == BuiltinCommand::switch_procedure) {
+                const auto& source = std::get<OneSourceArguments>(
+                    instruction->arguments).source;
+                auto ref = read_resolver.resolve_reference(source.reference);
+                if (!ref) return std::unexpected(operand_error(ref.error()));
+                if (source.immediate || ref->immediate || ref->address.bit_offset != 0) {
+                    return std::unexpected(error(VmErrorCode::invalid_state,
+                                                 "call requires a whole procedure register"));
+                }
+                auto size = registers_->size(ref->address.handle);
+                if (!size) return std::unexpected(register_error(size.error()));
+                if (*size != source.bit_count) {
+                    return std::unexpected(error(VmErrorCode::invalid_state,
+                                                 "call requires a whole procedure register"));
+                }
+                called_procedure = ref->address.handle;
+            } else {
+                const auto& source = instruction->command == BuiltinCommand::switch_network
+                    ? std::get<OneSourceArguments>(instruction->arguments).source
+                    : std::get<TwoSourceArguments>(instruction->arguments).second;
+                auto bits = read_resolver.read_source_bits(source);
+                if (!bits) return std::unexpected(operand_error(bits.error()));
+                if (bits->size() != runtime_reference_bit_size) {
+                    return std::unexpected(error(VmErrorCode::decode_error,
+                                                 "network entry requires a NodeRef"));
+                }
+                BitCursor entry_cursor(*bits);
+                auto entry = decode_runtime_reference(entry_cursor);
+                if (!entry) return std::unexpected(codec_error(entry.error()));
+                called_entry = *entry;
+                if (instruction->command == BuiltinCommand::switch_procedure_and_network) {
+                    auto body = read_resolver.read_source_bits(
+                        std::get<TwoSourceArguments>(instruction->arguments).first);
+                    if (!body) return std::unexpected(operand_error(body.error()));
+                    auto procedure = registers_->create(RegisterClass::global, *body, true);
+                    if (!procedure) return std::unexpected(register_error(procedure.error()));
+                    called_procedure = *procedure;
+                    owns_procedure = true;
+                }
+            }
+            break;
+        }
+        case BuiltinCommand::return_result: {
+            if (modify_index == 0) {
+                return std::unexpected(error(VmErrorCode::invalid_state,
+                                             "root activation has no caller result"));
+            }
+            auto bits = read_resolver.read_source_bits(
+                std::get<OneSourceArguments>(instruction->arguments).source);
+            if (!bits) return std::unexpected(operand_error(bits.error()));
+            auto written = registers_->replace(
+                activations_[modify_index - 1].activation.result_register, *bits);
+            if (!written) return std::unexpected(register_error(written.error()));
+            break;
+        }
         case BuiltinCommand::compute: {
             const auto& arguments = std::get<ComputeArguments>(instruction->arguments);
             std::vector<Value> operands;
@@ -589,8 +788,13 @@ VmResult<StepResult> VirtualMachine::step_impl() {
             return std::unexpected(persisted.error());
         }
     }
-    return StepResult{instruction->command, *instruction->branch, next,
-                      modify_activation.procedure_position};
+    const auto position = modify_activation.procedure_position;
+    if (called_procedure) {
+        auto called = enter_call(*called_procedure, called_entry, owns_procedure);
+        if (!called) return std::unexpected(called.error());
+    }
+    return StepResult{instruction->command, *instruction->branch, next, position,
+                      called_procedure.has_value()};
 }
 
 }  // namespace ubcm

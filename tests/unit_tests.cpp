@@ -231,7 +231,7 @@ void test_activation_records() {
         {ubcm::RegisterClass::global, 5}, 0);
     activation.local_resolver = ubcm::RuntimeReference::at(
         {ubcm::RegisterClass::global, 3}, 1184);
-    activation.result_register = {ubcm::RegisterClass::local, 7};
+    activation.result_register = {ubcm::RegisterClass::global, 7};
     activation.prefix = {ubcm::PrefixKind::read, 1, false};
 
     auto encoded = ubcm::encode_activation(activation);
@@ -653,6 +653,233 @@ ubcm::NodeReference stored_node_reference(ubcm::RegisterBank& registers,
     return *reference;
 }
 
+void test_vm_nested_calls() {
+    ubcm::RegisterBank registers;
+    ubcm::NameResolver globals;
+    const auto output_name = *ubcm::BitVector::from_bit_string("1");
+    const auto output = *registers.create(ubcm::RegisterClass::global, ubcm::BitVector(3));
+    expect(globals.bind(output_name, output).has_value(), "bind nested call output");
+    const ubcm::SourceOperand result_source{ubcm::DirectReference{
+        {{ubcm::RegisterClass::local, {}}, 0}}, 3, false};
+    auto root_program = ubcm::encode_source(result_source);
+    root_program.append(ubcm::encode_destination({ubcm::DirectReference{
+        {{ubcm::RegisterClass::global, output_name}, 0}}}));
+    root_program.push_back(true);
+    auto middle_program = ubcm::encode_source(result_source);
+    middle_program.push_back(true);
+    auto leaf_program = ubcm::encode_source({std::uint64_t{5}, 0, true});
+    leaf_program.push_back(true);
+    const auto root_proc = *registers.create(ubcm::RegisterClass::global, root_program, true);
+    const auto middle_proc = *registers.create(ubcm::RegisterClass::global, middle_program, true);
+    const auto leaf_proc = *registers.create(ubcm::RegisterClass::global, leaf_program, true);
+    const auto root_nodes = install_node_sequence(registers, {
+        ubcm::BuiltinCommand::branch, ubcm::BuiltinCommand::copy,
+        ubcm::BuiltinCommand::finish_call});
+    const auto middle_nodes = install_node_sequence(registers, {
+        ubcm::BuiltinCommand::branch, ubcm::BuiltinCommand::return_result,
+        ubcm::BuiltinCommand::finish_call});
+    const auto leaf_nodes = install_node_sequence(registers, {
+        ubcm::BuiltinCommand::return_result, ubcm::BuiltinCommand::finish_call});
+    const auto call_node = [&](ubcm::NodeReference at, ubcm::RegisterHandle procedure,
+                               ubcm::NodeReference entry, ubcm::NodeReference next) {
+        ubcm::Node node;
+        node.kind = ubcm::NodeKind::procedure_call;
+        node.procedure = procedure;
+        node.entry = entry;
+        node.next0 = next;
+        auto bits = ubcm::encode_node(node);
+        expect(bits && registers.write({at.handle, at.bit_offset}, *bits),
+               "install procedure call node");
+    };
+    call_node(root_nodes.references[0], middle_proc, middle_nodes.references[0],
+              root_nodes.references[1]);
+    call_node(middle_nodes.references[0], leaf_proc, leaf_nodes.references[0],
+              middle_nodes.references[1]);
+    ubcm::ActivationRecord root;
+    root.procedure = root_proc;
+    root.network_state = ubcm::RuntimeReference::at(root_nodes.state, 0);
+    ubcm::VirtualMachine vm(registers, root, {.global = &globals});
+    const auto root_storage = *vm.activation_storage_at_depth(0);
+    const auto root_result = vm.current_activation().result_register;
+    auto first = vm.step();
+    expect(first && first->called && !first->command && vm.activation_count() == 2 &&
+               (*vm.activation_at_depth(1))->procedure_position == 0,
+           "TYPE=1 consumes no procedure bits and pushes an activation");
+    const auto middle_storage = *vm.activation_storage_at_depth(0);
+    const auto middle_result = vm.current_activation().result_register;
+    auto second = vm.step();
+    expect(second && second->called && vm.activation_count() == 3,
+           "nested call creates a third activation");
+    const auto leaf_storage = *vm.activation_storage_at_depth(0);
+    const auto leaf_result = vm.current_activation().result_register;
+    const auto leaf_state = vm.current_activation().network_state.handle;
+    expect(vm.step() && registers.read({middle_result, 0}, 3)->to_bit_string() == "101" &&
+               vm.activation_count() == 3,
+           "return-result writes caller result without finishing the call");
+    expect(vm.step() && vm.activation_count() == 2 &&
+               !registers.view(leaf_storage.handle) && !registers.view(leaf_result) &&
+               !registers.view(leaf_state) && registers.view(leaf_proc),
+           "finish deletes owned registers and preserves borrowed procedure");
+    expect(vm.step() && registers.read({root_result, 0}, 3)->to_bit_string() == "101",
+           "caller reads its reserved result name and returns it");
+    expect(vm.step() && vm.activation_count() == 1 &&
+               !registers.view(middle_storage.handle) && !registers.view(middle_result),
+           "nested return restores root activation");
+    expect(vm.step() && registers.read({output, 0}, 3)->to_bit_string() == "101",
+           "root resumes its continuation and reads the returned result");
+    auto finished = vm.step();
+    expect(finished && finished->halted && vm.halted() && vm.activation_count() == 0 &&
+               !registers.view(root_storage.handle) && !registers.view(root_result) &&
+               registers.view(root_proc) && !vm.step(),
+           "root finish halts and releases root activation storage");
+}
+
+void test_vm_builtin_calls() {
+    for (auto command : {ubcm::BuiltinCommand::switch_procedure,
+                         ubcm::BuiltinCommand::switch_network,
+                         ubcm::BuiltinCommand::switch_procedure_and_network}) {
+        for (bool invalid : {false, true}) {
+            ubcm::RegisterBank registers;
+            ubcm::NameResolver globals;
+            const auto body_name = *ubcm::BitVector::from_bit_string("0");
+            const auto entry_name = *ubcm::BitVector::from_bit_string("1");
+            auto body = *registers.create(ubcm::RegisterClass::global,
+                *ubcm::BitVector::from_bit_string("101"), !invalid);
+            const auto child_nodes = install_node_sequence(
+                registers, {ubcm::BuiltinCommand::finish_call});
+            auto entry = *registers.create(ubcm::RegisterClass::global,
+                *ubcm::encode_runtime_reference(invalid ? ubcm::RuntimeReference{}
+                                                       : child_nodes.references[0]));
+            expect(globals.bind(body_name, body) && globals.bind(entry_name, entry),
+                   "bind builtin call arguments");
+            const ubcm::SourceOperand body_source{ubcm::DirectReference{
+                {{ubcm::RegisterClass::global, body_name}, 0}}, 3, false};
+            const ubcm::SourceOperand entry_source{ubcm::DirectReference{
+                {{ubcm::RegisterClass::global, entry_name}, 0}}, 128, false};
+            auto program = ubcm::encode_source(
+                command == ubcm::BuiltinCommand::switch_network ? entry_source : body_source);
+            if (command == ubcm::BuiltinCommand::switch_procedure_and_network) {
+                program.append(ubcm::encode_source(entry_source));
+            }
+            program.push_back(true);
+            auto procedure = *registers.create(ubcm::RegisterClass::global, program, true);
+            const auto nodes = install_node_sequence(
+                registers, {command, ubcm::BuiltinCommand::finish_call});
+            ubcm::ActivationRecord activation;
+            activation.procedure = procedure;
+            activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+            ubcm::VirtualMachine vm(registers, activation, {.global = &globals});
+            const auto before = **registers.view(nodes.state);
+            const auto current_storage = *vm.activation_storage_at_depth(0);
+            const auto before_activation = **registers.view(current_storage.handle);
+            auto before_bank = registers;
+            auto called = vm.step();
+            if (invalid) {
+                expect(!called && vm.activation_count() == 1 &&
+                           **registers.view(nodes.state) == before &&
+                           **registers.view(current_storage.handle) == before_activation,
+                       "invalid call rolls back continuation and activation allocation");
+                const auto actual_id = registers.create(
+                    ubcm::RegisterClass::global, ubcm::BitVector{});
+                const auto expected_id = before_bank.create(
+                    ubcm::RegisterClass::global, ubcm::BitVector{});
+                expect(actual_id && expected_id && *actual_id == *expected_id,
+                       "failed call does not consume register IDs");
+                continue;
+            }
+            expect(called && called->called && vm.activation_count() == 2 &&
+                       vm.current_activation().procedure_position == 0 &&
+                       (*vm.activation_at_depth(1))->procedure_position == program.size(),
+                   "builtin call saves caller position and starts child at zero");
+            const auto child_proc = vm.current_activation().procedure;
+            const bool copied = command == ubcm::BuiltinCommand::switch_procedure_and_network;
+            expect(command == ubcm::BuiltinCommand::switch_procedure
+                       ? vm.current_activation().network_state == activation.network_state
+                       : vm.current_activation().network_state != activation.network_state,
+                   "builtin call shares or creates network state as specified");
+            if (copied) {
+                expect(child_proc != body && **registers.view(child_proc) ==
+                           **registers.view(body) && *registers.is_immutable(child_proc),
+                       "1000 creates an immutable copy of procedure bits");
+            }
+            expect(vm.step() && vm.activation_count() == 1 &&
+                       (!copied || !registers.view(child_proc)) &&
+                       vm.step() && vm.halted(),
+                   "builtin call returns and cleans up its owned procedure");
+        }
+    }
+}
+
+void test_vm_call_edges() {
+    for (auto command : {ubcm::BuiltinCommand::switch_procedure,
+                         ubcm::BuiltinCommand::switch_network,
+                         ubcm::BuiltinCommand::switch_procedure_and_network,
+                         ubcm::BuiltinCommand::finish_call}) {
+        ubcm::RegisterBank registers;
+        ubcm::BitVector program;
+        if (command != ubcm::BuiltinCommand::finish_call) {
+            program.append(ubcm::encode_source({std::uint64_t{0}, 0, true}));
+            if (command == ubcm::BuiltinCommand::switch_procedure_and_network) {
+                program.append(ubcm::encode_source({std::uint64_t{0}, 0, true}));
+            }
+            program.push_back(true);
+        }
+        auto procedure = *registers.create(ubcm::RegisterClass::global, program, true);
+        const auto nodes = install_node_sequence(
+            registers, {command, ubcm::BuiltinCommand::finish_call});
+        ubcm::ActivationRecord root;
+        root.procedure = procedure;
+        root.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+        auto current = root;
+        current.prefix = {ubcm::PrefixKind::modify, 1, false};
+        ubcm::VirtualMachine vm(registers, std::vector<ubcm::ActivationFrame>{
+            {root, {}}, {current, {}}});
+        auto step = vm.step();
+        expect(!step && step.error().code == ubcm::VmErrorCode::invalid_state &&
+                   vm.activation_count() == 2 &&
+                   vm.current_activation().prefix == current.prefix,
+               "call control rejects a nonzero modify depth");
+    }
+    for (auto command : {ubcm::BuiltinCommand::return_result,
+                         ubcm::BuiltinCommand::finish_call}) {
+        for (bool suppressed : {false, true}) {
+            ubcm::RegisterBank registers;
+            auto program = command == ubcm::BuiltinCommand::return_result
+                ? ubcm::encode_source({std::uint64_t{0}, 0, true}) : ubcm::BitVector{};
+            if (command == ubcm::BuiltinCommand::return_result) program.push_back(true);
+            auto procedure = *registers.create(ubcm::RegisterClass::global, program, true);
+            const auto nodes = install_node_sequence(
+                registers, {command, ubcm::BuiltinCommand::finish_call});
+            ubcm::ActivationRecord activation;
+            activation.procedure = procedure;
+            activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+            if (suppressed) activation.prefix = {ubcm::PrefixKind::condition, 0, false};
+            ubcm::VirtualMachine vm(registers, std::vector<ubcm::ActivationFrame>{
+                {activation, {}}, {activation, {}}});
+            const auto caller_result = (*vm.activation_at_depth(1))->result_register;
+            expect(registers.replace(caller_result,
+                       *ubcm::BitVector::from_bit_string("111")).has_value(),
+                   "initialize nonempty result");
+            auto step = vm.step();
+            expect(step.has_value(), "execute return/finish edge case");
+            if (suppressed) {
+                expect(vm.activation_count() == 2 &&
+                           vm.current_activation().prefix.kind == ubcm::PrefixKind::none &&
+                           registers.size(caller_result) == 3,
+                       "false condition suppresses return and finish effects");
+            } else if (command == ubcm::BuiltinCommand::return_result) {
+                expect(vm.activation_count() == 2 && registers.size(caller_result) == 0 &&
+                           registers.view(caller_result),
+                       "empty return keeps an existing zero-bit result register");
+            } else {
+                expect(vm.activation_count() == 1 &&
+                           vm.current_activation().procedure_position == 0,
+                       "finish consumes no branch bit");
+            }
+        }
+    }
+}
+
 void test_vm_foreign_references() {
     for (bool indirect : {false, true}) {
         for (bool prefixed : {false, true}) {
@@ -722,8 +949,8 @@ void test_foreign_reference_errors() {
                                     ubcm::encode_reference(reference));
     expect(locals.bind(name, pointer).has_value(), "bind cyclic foreign pointer");
     ubcm::OperandResolver resolver(registers, {},
-        {}, [&locals](std::uint64_t) -> ubcm::OperandResult<const ubcm::NameResolver*> {
-            return &locals;
+        {}, [&locals](std::uint64_t) -> ubcm::OperandResult<ubcm::OperandResolvers> {
+            return ubcm::OperandResolvers{.local = &locals};
         });
     auto cycle = resolver.resolve_reference(reference);
     expect(!cycle && cycle.error().code == ubcm::OperandErrorCode::invalid_reference,
@@ -1573,6 +1800,9 @@ int main() {
         {"vm_branch_step", test_vm_branch_step},
         {"vm_activation_stack", test_vm_activation_stack},
         {"vm_activation_chain", test_vm_activation_chain},
+        {"vm_nested_calls", test_vm_nested_calls},
+        {"vm_builtin_calls", test_vm_builtin_calls},
+        {"vm_call_edges", test_vm_call_edges},
         {"vm_foreign_references", test_vm_foreign_references},
         {"foreign_reference_errors", test_foreign_reference_errors},
         {"operand_resolution", test_operand_resolution},

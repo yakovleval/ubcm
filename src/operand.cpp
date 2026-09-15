@@ -50,6 +50,10 @@ OperandResult<RegisterAddress> OperandResolver::resolve_selector(
     if (selector.class_id == RegisterClass::procedure) {
         return RegisterAddress{procedure_, 0};
     }
+    if (selector.class_id == RegisterClass::local && selector.name.size() == 0 &&
+        resolvers_.result) {
+        return RegisterAddress{*resolvers_.result, 0};
+    }
     const NameResolver* resolver = nullptr;
     switch (selector.class_id) {
         case RegisterClass::superlocal:
@@ -124,7 +128,7 @@ OperandResult<ResolvedReference> OperandResolver::resolve_reference_impl(
     }
 
     const auto& foreign = std::get<ForeignReference>(reference);
-    const NameResolver* local = resolvers_.local;
+    auto context = resolvers_;
     if (foreign.depth != 0U) {
         if (!activation_lookup_) {
             return std::unexpected(error(OperandErrorCode::unsupported_reference,
@@ -132,13 +136,16 @@ OperandResult<ResolvedReference> OperandResolver::resolve_reference_impl(
         }
         auto resolver = activation_lookup_(foreign.depth);
         if (!resolver) return std::unexpected(resolver.error());
-        local = *resolver;
+        context = *resolver;
     }
-    if (local == nullptr) {
+    if (context.local == nullptr && !(foreign.local_name.size() == 0 && context.result)) {
         return std::unexpected(error(OperandErrorCode::unresolved_name,
                                      "local register resolver is unavailable"));
     }
-    auto base = local->resolve_address(foreign.local_name);
+    RegisterResult<RegisterAddress> base =
+        foreign.local_name.size() == 0 && context.result
+            ? RegisterResult<RegisterAddress>{RegisterAddress{*context.result, 0}}
+            : context.local->resolve_address(foreign.local_name);
     if (!base) return std::unexpected(from_register_error(base.error()));
     if (foreign.bit_offset > std::numeric_limits<std::uint64_t>::max() -
                                  base->bit_offset) {

@@ -98,9 +98,9 @@ CodecResult<BitVector> encode_activation(const ActivationRecord& activation) {
         return std::unexpected(error(CodecErrorCode::invalid_data, 288,
                                      "local resolver reference is not node-aligned"));
     }
-    if (activation.result_register.class_id != RegisterClass::local) {
+    if (activation.result_register.class_id != RegisterClass::global) {
         return std::unexpected(error(CodecErrorCode::invalid_data, 544,
-                                     "activation result register must be local"));
+                                     "activation result register must be global"));
     }
 
     auto procedure = encode_register_handle(activation.procedure);
@@ -163,9 +163,9 @@ CodecResult<ActivationRecord> decode_activation(BitCursor& cursor) {
         return std::unexpected(error(CodecErrorCode::invalid_data, start + 288,
                                      "local resolver reference is not node-aligned"));
     }
-    if (result->class_id != RegisterClass::local) {
+    if (result->class_id != RegisterClass::global) {
         return std::unexpected(error(CodecErrorCode::invalid_data, start + 544,
-                                     "activation result register must be local"));
+                                     "activation result register must be global"));
     }
     auto prefix = decode_prefix(*prefix_kind, *prefix_payload, start + 616);
     if (!prefix) {

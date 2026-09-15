@@ -34,6 +34,7 @@ struct OperandResolvers {
     const NameResolver* superlocal{};
     const NameResolver* local{};
     const NameResolver* global{};
+    std::optional<RegisterHandle> result;
 };
 
 struct ResolvedReference {
@@ -44,7 +45,7 @@ struct ResolvedReference {
 class OperandResolver {
 public:
     using ActivationLookup =
-        std::function<OperandResult<const NameResolver*>(std::uint64_t)>;
+        std::function<OperandResult<OperandResolvers>(std::uint64_t)>;
     OperandResolver(RegisterBank& registers, RegisterHandle procedure,
                     OperandResolvers resolvers = {}, ActivationLookup lookup = {});
 

@@ -33,7 +33,7 @@ struct ActivationRecord {
     RuntimeReference network_state{};
     NodeReference local_resolver{};
     RuntimeReference previous_activation{};
-    RegisterHandle result_register{RegisterClass::local, 0};
+    RegisterHandle result_register{RegisterClass::global, 0};
     PrefixState prefix{};
 
     friend bool operator==(const ActivationRecord&, const ActivationRecord&) = default;

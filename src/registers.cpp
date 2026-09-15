@@ -206,6 +206,22 @@ RegisterResult<const BitVector*> RegisterBank::view(RegisterHandle handle) const
     return &(*found)->contents;
 }
 
+RegisterResult<void> RegisterBank::replace(RegisterHandle handle, const BitVector& value) {
+    auto entry = find(handle);
+    if (!entry) return std::unexpected(entry.error());
+    if ((*entry)->immutable) {
+        return std::unexpected(error(RegisterError::Code::immutable, "register is immutable"));
+    }
+    try {
+        BitVector copy = value;
+        std::swap((*entry)->contents, copy);
+    } catch (const std::exception&) {
+        return std::unexpected(error(RegisterError::Code::resource_exhausted,
+                                      "register replacement failed"));
+    }
+    return {};
+}
+
 RegisterResult<bool> RegisterBank::is_immutable(RegisterHandle handle) const {
     const auto found = find(handle);
     if (!found) {
