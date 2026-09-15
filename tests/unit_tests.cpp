@@ -653,6 +653,96 @@ ubcm::NodeReference stored_node_reference(ubcm::RegisterBank& registers,
     return *reference;
 }
 
+void test_vm_activation_chain() {
+    for (const std::string_view scenario : {
+             "skip", "external", "null", "self", "cycle", "deleted",
+             "truncated", "corrupt", "depth"}) {
+        ubcm::RegisterBank registers;
+        const auto procedure = *registers.create(ubcm::RegisterClass::global,
+            *ubcm::BitVector::from_bit_string("10"), true);
+        const auto nodes = install_branching_nodes(registers, ubcm::BuiltinCommand::branch);
+        ubcm::ActivationRecord root;
+        root.procedure = procedure;
+        root.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+        auto middle = root;
+        middle.procedure_position = 1;
+        auto current = root;
+        current.prefix = {ubcm::PrefixKind::read, 1, false};
+        ubcm::VirtualMachine vm(registers, std::vector<ubcm::ActivationFrame>{
+            {root, {}}, {middle, {}}, {current, {}}});
+        const auto root_storage = *vm.activation_storage_at_depth(2);
+        const auto current_storage = *vm.activation_storage_at_depth(0);
+        auto read_storage = root_storage;
+        auto stored_current = vm.current_activation();
+        stored_current.previous_activation = root_storage;
+        const auto write_activation = [&](ubcm::RuntimeReference where,
+                                           const ubcm::ActivationRecord& record) {
+            auto bits = ubcm::encode_activation(record);
+            expect(bits && registers.write({where.handle, where.bit_offset}, *bits),
+                   "update stored activation chain");
+        };
+
+        if (scenario == "external") {
+            // A record outside the constructor's vector, at an unaligned offset.
+            ubcm::BitVector contents(3);
+            contents.append(*ubcm::encode_activation(root));
+            auto handle = *registers.create(ubcm::RegisterClass::global, contents);
+            read_storage = ubcm::RuntimeReference::at(handle, 3);
+            stored_current.previous_activation = read_storage;
+        } else if (scenario == "null") {
+            stored_current.previous_activation = {};
+            stored_current.prefix = {};
+        } else if (scenario == "self") {
+            stored_current.previous_activation = current_storage;
+        } else if (scenario == "cycle") {
+            root.previous_activation = current_storage;
+            write_activation(root_storage, root);
+        } else if (scenario == "deleted") {
+            expect(registers.erase(root_storage.handle).has_value(),
+                   "delete referenced activation");
+        } else if (scenario == "truncated") {
+            expect(registers.resize(root_storage.handle,
+                                    ubcm::activation_bit_size - 1).has_value(),
+                   "truncate referenced activation");
+        } else if (scenario == "corrupt") {
+            expect(registers.write({root_storage.handle, 0},
+                                   ubcm::BitVector(16)).has_value(),
+                   "corrupt referenced activation header");
+        } else if (scenario == "depth") {
+            stored_current.prefix.depth = std::numeric_limits<std::uint64_t>::max();
+        }
+        write_activation(current_storage, stored_current);
+        const auto before_current = **registers.view(current_storage.handle);
+        const auto before_state = **registers.view(nodes.state);
+        const auto before_cache = vm.current_activation();
+        auto result = vm.step();
+        if (scenario == "skip" || scenario == "external") {
+            expect(result && result->branch && vm.activation_count() == 2 &&
+                       vm.activation_storage_at_depth(1) == read_storage &&
+                       vm.current_activation().procedure_position == 0,
+                   "read prefix follows stored links instead of original vector order");
+            const auto bits = registers.read(
+                {read_storage.handle, read_storage.bit_offset}, ubcm::activation_bit_size);
+            expect(bits && ubcm::decode_activation(*bits)->procedure_position == 1,
+                   "linked activation cursor is persisted at its actual bit offset");
+        } else if (scenario == "null") {
+            expect(result && vm.activation_count() == 1 &&
+                       !vm.activation_at_depth(1),
+                   "null previous reference terminates the active chain");
+        } else {
+            const auto expected = scenario == "corrupt" ? ubcm::VmErrorCode::decode_error
+                : scenario == "deleted" || scenario == "truncated"
+                    ? ubcm::VmErrorCode::register_access : ubcm::VmErrorCode::invalid_state;
+            expect(!result && result.error().code == expected &&
+                       **registers.view(current_storage.handle) == before_current &&
+                       **registers.view(nodes.state) == before_state &&
+                       vm.current_activation() == before_cache &&
+                       vm.activation_count() == 3,
+                   "invalid activation chain fails without changing VM state");
+        }
+    }
+}
+
 void test_vm_prefix_commands() {
     {
         ubcm::RegisterBank registers;
@@ -1394,6 +1484,7 @@ int main() {
         {"builtin_decoder", test_builtin_decoder},
         {"vm_branch_step", test_vm_branch_step},
         {"vm_activation_stack", test_vm_activation_stack},
+        {"vm_activation_chain", test_vm_activation_chain},
         {"operand_resolution", test_operand_resolution},
         {"indirect_reference_limits", test_indirect_reference_limits},
         {"vm_prefix_commands", test_vm_prefix_commands},

@@ -1,7 +1,9 @@
 #include "ubcm/vm.hpp"
 
+#include <algorithm>
 #include <new>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -71,8 +73,10 @@ VirtualMachine::VirtualMachine(RegisterBank& registers,
             throw std::runtime_error("VM cannot allocate activation storage");
         }
         frame.storage = RuntimeReference::at(*storage, 0);
+        resolvers_[{storage->id, 0}] = frame.resolvers;
         previous = frame.storage;
     }
+    current_storage_ = previous;
 }
 
 ActivationFrame& VirtualMachine::current_frame() noexcept {
@@ -268,14 +272,33 @@ VmResult<StepResult> VirtualMachine::step() {
 }
 
 VmResult<void> VirtualMachine::reload_activations() {
-    for (auto& frame : activations_) {
+    std::vector<ActivationFrame> chain;
+    std::set<std::pair<std::uint64_t, std::uint64_t>> visited;
+    auto reference = current_storage_;
+    while (!reference.null) {
+        if (reference.handle.class_id != RegisterClass::global) {
+            return std::unexpected(error(VmErrorCode::invalid_state,
+                                         "activation must be stored in a global register"));
+        }
+        const auto key = std::pair{reference.handle.id, reference.bit_offset};
+        if (!visited.insert(key).second) {
+            return std::unexpected(error(VmErrorCode::invalid_state,
+                                         "activation chain contains a cycle"));
+        }
         auto bits = registers_->read(
-            {frame.storage.handle, frame.storage.bit_offset}, activation_bit_size);
+            {reference.handle, reference.bit_offset}, activation_bit_size);
         if (!bits) return std::unexpected(register_error(bits.error()));
         auto activation = decode_activation(*bits);
         if (!activation) return std::unexpected(codec_error(activation.error()));
-        frame.activation = std::move(*activation);
+        const auto resolver = resolvers_.find(key);
+        chain.push_back({*activation,
+                         resolver == resolvers_.end() ? OperandResolvers{}
+                                                      : resolver->second,
+                         reference});
+        reference = activation->previous_activation;
     }
+    std::reverse(chain.begin(), chain.end());
+    activations_ = std::move(chain);
     return {};
 }
 

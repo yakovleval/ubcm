@@ -8,7 +8,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace ubcm {
@@ -49,6 +51,8 @@ public:
                    OperandResolvers resolvers = {});
     VirtualMachine(RegisterBank& registers, std::vector<ActivationFrame> activations);
 
+    // These accessors expose the snapshot from construction or the last
+    // successful step. Each step rebuilds it from the stored activation chain.
     [[nodiscard]] const ActivationRecord& current_activation() const noexcept;
     [[nodiscard]] VmResult<const ActivationRecord*> activation_at_depth(
         std::uint64_t depth) const;
@@ -79,6 +83,8 @@ private:
     [[nodiscard]] OperandResolver operand_resolver(const ActivationFrame& frame) const;
 
     RegisterBank* registers_;
+    RuntimeReference current_storage_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, OperandResolvers> resolvers_;
     std::vector<ActivationFrame> activations_;
 };
 
