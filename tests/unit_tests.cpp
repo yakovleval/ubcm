@@ -177,15 +177,13 @@ void test_registers_and_addressing() {
            "selector resolution");
 
     ubcm::NameResolver wrong_class_resolver;
-    expect(wrong_class_resolver.bind(
-               name, ubcm::RegisterHandle{ubcm::RegisterClass::local, 8}).has_value(),
-           "bind mismatched register class");
+    expect(!wrong_class_resolver.bind(
+               name, ubcm::RegisterHandle{ubcm::RegisterClass::local, 8}),
+           "resolver rejects a logical handle as physical storage");
     ubcm::ResolutionContext wrong_context{nullptr, nullptr, nullptr,
                                           &wrong_class_resolver};
-    expect(ubcm::resolve_selector(selector, wrong_context) ==
-               ubcm::RegisterAddress{
-                   {ubcm::RegisterClass::local, 8}, 0},
-           "selector class chooses the resolver scope");
+    expect(!ubcm::resolve_selector(selector, wrong_context),
+           "rejected binding does not resolve");
 
     auto truncated_selector = *ubcm::BitVector::from_bit_string("11");
     ubcm::BitCursor selector_cursor(truncated_selector);
@@ -414,8 +412,10 @@ void test_vm_activation_stack() {
                registers.write({current_storage->handle,
                                 current_storage->bit_offset},
                                *modified_current) &&
-               !vm.step() && vm.current_activation().procedure_position == 42,
-           "global activation storage is authoritative");
+               !vm.step() && vm.current_activation().procedure_position == 7 &&
+               registers.read({current_storage->handle, 0},
+                              ubcm::activation_bit_size) == *modified_current,
+           "failed step preserves cache and externally written activation storage");
 
     bool rejected_empty_stack = false;
     try {
@@ -453,7 +453,7 @@ void test_operand_resolution() {
     expect(resolver.read_source_uint(immediate) == 5,
            "immediate source is an unsigned integer");
 
-    auto local = registers.create(ubcm::RegisterClass::local,
+    auto local = registers.create(ubcm::RegisterClass::global,
                                   *ubcm::BitVector::from_bit_string("0"));
     ubcm::NameResolver mismatched_globals;
     expect(local && mismatched_globals.bind(name, *local),
@@ -480,11 +480,11 @@ void test_operand_resolution() {
                registers.read({*backing, 0}, 8)->to_bit_string() == "00001100",
            "local register uses its global base offset");
 
-    expect(registers.write(
+    expect(!registers.write(
                {{ubcm::RegisterClass::local, backing->id}, 0},
                *ubcm::BitVector::from_bit_string("1")) &&
-               registers.read({*backing, 0}, 1)->to_bit_string() == "1",
-           "logical handles alias one physical global register");
+               registers.read({*backing, 0}, 1)->to_bit_string() == "0",
+           "logical handles cannot access physical storage");
 }
 
 void test_indirect_reference_limits() {
@@ -835,9 +835,9 @@ void test_vm_prefix_application() {
         ubcm::NameResolver root_locals;
         ubcm::NameResolver current_locals;
         auto local_name = *ubcm::BitVector::from_bit_string("1");
-        auto root_target = registers.create(ubcm::RegisterClass::local,
+        auto root_target = registers.create(ubcm::RegisterClass::global,
                                             ubcm::BitVector(5));
-        auto current_target = registers.create(ubcm::RegisterClass::local,
+        auto current_target = registers.create(ubcm::RegisterClass::global,
                                                ubcm::BitVector(5));
         expect(root_target && current_target &&
                    root_locals.bind(local_name, *root_target) &&
@@ -894,9 +894,9 @@ void test_vm_prefix_application() {
         ubcm::NameResolver root_locals;
         ubcm::NameResolver current_locals;
         auto local_name = *ubcm::BitVector::from_bit_string("1");
-        auto root_target = registers.create(ubcm::RegisterClass::local,
+        auto root_target = registers.create(ubcm::RegisterClass::global,
                                             ubcm::BitVector(5));
-        auto current_target = registers.create(ubcm::RegisterClass::local,
+        auto current_target = registers.create(ubcm::RegisterClass::global,
                                                ubcm::BitVector(5));
         expect(root_target && current_target &&
                    root_locals.bind(local_name, *root_target) &&
@@ -1198,6 +1198,74 @@ void test_vm_core_builtin_effects() {
     }
 }
 
+void test_vm_atomic_storage_updates() {
+    for (bool activation_target : {false, true}) {
+        for (std::uint64_t size : {0U, 1U}) {
+            ubcm::RegisterBank registers;
+            ubcm::NameResolver locals;
+            const auto name = *ubcm::BitVector::from_bit_string("1");
+            auto program = ubcm::encode_register_selector(
+                {ubcm::RegisterClass::local, name});
+            program.append(ubcm::encode_source({size, 0, true}));
+            program.push_back(true);
+            auto procedure = *registers.create(ubcm::RegisterClass::procedure,
+                                               program, true);
+            const auto nodes = install_branching_nodes(
+                registers, ubcm::BuiltinCommand::resize_register);
+            ubcm::ActivationRecord activation;
+            activation.procedure = procedure;
+            activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+            ubcm::VirtualMachine vm(registers, activation, {.local = &locals});
+            const auto storage = *vm.activation_storage_at_depth(0);
+            const auto target = activation_target ? storage.handle : nodes.state;
+            expect(locals.bind(name, ubcm::RegisterAddress{target, 17}).has_value(),
+                   "bind local name to protected global storage");
+            const auto before_state = **registers.view(nodes.state);
+            const auto before_activation = **registers.view(storage.handle);
+            const auto before_cache = vm.current_activation();
+            auto result = vm.step();
+            expect(!result && result.error().code == ubcm::VmErrorCode::invalid_state &&
+                       **registers.view(nodes.state) == before_state &&
+                       **registers.view(storage.handle) == before_activation &&
+                       vm.current_activation() == before_cache,
+                   "local resize cannot delete or truncate active storage");
+        }
+    }
+
+    ubcm::RegisterBank registers;
+    auto procedure = *registers.create(ubcm::RegisterClass::procedure,
+        *ubcm::BitVector::from_bit_string("1"), true);
+    const auto nodes = install_branching_nodes(registers, ubcm::BuiltinCommand::branch);
+    ubcm::ActivationRecord activation;
+    activation.procedure = procedure;
+    activation.network_state = ubcm::RuntimeReference::at(nodes.state, 0);
+    ubcm::VirtualMachine vm(registers, activation);
+    const auto storage = *vm.activation_storage_at_depth(0);
+
+    // Rebuild the fixture with read-only activation storage. The branch can
+    // update network state, but the final activation write must fail.
+    ubcm::RegisterBank read_only_activation;
+    expect(read_only_activation.create(ubcm::RegisterClass::procedure,
+               **registers.view(procedure), true).has_value(),
+           "copy procedure into late-failure fixture");
+    for (std::uint64_t id = 0; id <= storage.handle.id; ++id) {
+        const ubcm::RegisterHandle handle{ubcm::RegisterClass::global, id};
+        auto copied = read_only_activation.create(ubcm::RegisterClass::global,
+            **registers.view(handle), handle == storage.handle);
+        expect(copied == handle, "preserve physical IDs in late-failure fixture");
+    }
+    registers.swap(read_only_activation);
+    const auto before_state = **registers.view(nodes.state);
+    const auto before_activation = **registers.view(storage.handle);
+    const auto before_cache = vm.current_activation();
+    auto result = vm.step();
+    expect(!result && result.error().code == ubcm::VmErrorCode::register_access &&
+               **registers.view(nodes.state) == before_state &&
+               **registers.view(storage.handle) == before_activation &&
+               vm.current_activation() == before_cache,
+           "late activation write failure rolls back network and cached state");
+}
+
 ubcm::BitVector encode_compute_program(std::uint8_t operation,
                                        const ubcm::SourceOperand& first,
                                        const ubcm::SourceOperand& second,
@@ -1331,6 +1399,7 @@ int main() {
         {"vm_prefix_commands", test_vm_prefix_commands},
         {"vm_prefix_application", test_vm_prefix_application},
         {"vm_core_builtin_effects", test_vm_core_builtin_effects},
+        {"vm_atomic_storage_updates", test_vm_atomic_storage_updates},
         {"vm_compute_builtin", test_vm_compute_builtin},
     };
     std::size_t failed = 0;

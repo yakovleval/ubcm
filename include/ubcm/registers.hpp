@@ -44,6 +44,7 @@ template <typename T>
 using RegisterResult = std::expected<T, RegisterError>;
 
 struct RegisterAddress {
+    // Resolved names always refer to global storage, regardless of name scope.
     RegisterHandle handle;
     std::uint64_t bit_offset{};
 
@@ -66,6 +67,7 @@ private:
 
 class RegisterBank {
 public:
+    void swap(RegisterBank& other) noexcept;
     RegisterResult<RegisterHandle> create(RegisterClass class_id,
                                            const BitVector& contents,
                                            bool immutable = false);

@@ -245,7 +245,16 @@ OperandResolver VirtualMachine::operand_resolver(const ActivationFrame& frame) c
 
 VmResult<StepResult> VirtualMachine::step() {
     try {
-        return step_impl();
+        // Include late activation writes and allocation failures in the same
+        // transaction. Only the non-throwing swaps publish a successful step.
+        auto staged_registers = *registers_;
+        auto staged_vm = *this;
+        staged_vm.registers_ = &staged_registers;
+        auto result = staged_vm.step_impl();
+        if (!result) return result;
+        registers_->swap(staged_registers);
+        activations_.swap(staged_vm.activations_);
+        return result;
     } catch (const std::bad_alloc&) {
         return std::unexpected(error(VmErrorCode::resource_exhausted,
                                      "VM step ran out of memory"));

@@ -13,13 +13,6 @@ RegisterError error(RegisterError::Code code, const char* message) {
 
 std::string key(const BitVector& name) { return name.to_bit_string(); }
 
-RegisterHandle storage_handle(RegisterHandle handle) {
-    if (handle.class_id != RegisterClass::procedure) {
-        handle.class_id = RegisterClass::global;
-    }
-    return handle;
-}
-
 }  // namespace
 
 std::size_t RegisterHandleHash::operator()(const RegisterHandle& handle) const noexcept {
@@ -33,9 +26,10 @@ RegisterResult<void> NameResolver::bind(const BitVector& name, RegisterHandle ha
 
 RegisterResult<void> NameResolver::bind(const BitVector& name, RegisterAddress address) {
     const auto handle = address.handle;
-    if (handle.class_id == RegisterClass::procedure && handle.id != 0U) {
+    if (handle.class_id != RegisterClass::global ||
+        handle.id >= (std::uint64_t{1} << 62U)) {
         return std::unexpected(error(RegisterError::Code::invalid_handle,
-                                      "procedure handle must have id zero"));
+                                      "resolver requires a physical global register"));
     }
     const auto [_, inserted] = names_.emplace(key(name), address);
     if (!inserted) {
@@ -74,6 +68,10 @@ bool NameResolver::contains(const BitVector& name) const { return names_.contain
 RegisterResult<RegisterHandle> RegisterBank::create(RegisterClass class_id,
                                                      const BitVector& contents,
                                                      bool immutable) {
+    if (class_id != RegisterClass::global && class_id != RegisterClass::procedure) {
+        return std::unexpected(error(RegisterError::Code::invalid_handle,
+                                      "local registers have no separate storage"));
+    }
     RegisterHandle handle{class_id, 0U};
     if (class_id != RegisterClass::procedure) {
         constexpr auto max_register_id = (std::uint64_t{1} << 62U) - 1U;
@@ -83,7 +81,7 @@ RegisterResult<RegisterHandle> RegisterBank::create(RegisterClass class_id,
         }
         handle.id = next_id_;
     }
-    const auto stored_handle = storage_handle(handle);
+    const auto stored_handle = handle;
     if (entries_.contains(stored_handle)) {
         return std::unexpected(error(RegisterError::Code::invalid_handle,
                                       "procedure register already exists"));
@@ -101,7 +99,7 @@ RegisterResult<RegisterHandle> RegisterBank::create(RegisterClass class_id,
 }
 
 RegisterResult<void> RegisterBank::erase(RegisterHandle handle) {
-    if (entries_.erase(storage_handle(handle)) == 0U) {
+    if (entries_.erase(handle) == 0U) {
         return std::unexpected(error(RegisterError::Code::not_found, "register does not exist"));
     }
     return {};
@@ -118,7 +116,7 @@ RegisterResult<void> RegisterBank::resize(RegisterHandle handle, std::uint64_t b
                                       "immutable register cannot be resized"));
     }
     if (bit_size == 0U) {
-        entries_.erase(storage_handle(handle));
+        entries_.erase(handle);
         return {};
     }
     try {
@@ -139,12 +137,12 @@ RegisterResult<void> RegisterBank::resize_or_create(RegisterHandle handle,
     }
     if (bit_size == 0U) return {};
     constexpr auto max_register_id = (std::uint64_t{1} << 62U) - 1U;
-    if (handle.class_id == RegisterClass::procedure || handle.id > max_register_id) {
+    if (handle.class_id != RegisterClass::global || handle.id > max_register_id) {
         return std::unexpected(error(RegisterError::Code::invalid_handle,
                                       "cannot create the requested global register"));
     }
     try {
-        entries_.emplace(storage_handle(handle), Entry{BitVector(bit_size), false});
+        entries_.emplace(handle, Entry{BitVector(bit_size), false});
     } catch (const std::exception&) {
         return std::unexpected(error(RegisterError::Code::resource_exhausted,
                                       "register creation failed"));
@@ -217,7 +215,7 @@ RegisterResult<bool> RegisterBank::is_immutable(RegisterHandle handle) const {
 }
 
 RegisterResult<RegisterBank::Entry*> RegisterBank::find(RegisterHandle handle) {
-    const auto found = entries_.find(storage_handle(handle));
+    const auto found = entries_.find(handle);
     if (found == entries_.end()) {
         return std::unexpected(error(RegisterError::Code::not_found, "register does not exist"));
     }
@@ -225,11 +223,16 @@ RegisterResult<RegisterBank::Entry*> RegisterBank::find(RegisterHandle handle) {
 }
 
 RegisterResult<const RegisterBank::Entry*> RegisterBank::find(RegisterHandle handle) const {
-    const auto found = entries_.find(storage_handle(handle));
+    const auto found = entries_.find(handle);
     if (found == entries_.end()) {
         return std::unexpected(error(RegisterError::Code::not_found, "register does not exist"));
     }
     return &found->second;
+}
+
+void RegisterBank::swap(RegisterBank& other) noexcept {
+    entries_.swap(other.entries_);
+    std::swap(next_id_, other.next_id_);
 }
 
 }  // namespace ubcm
