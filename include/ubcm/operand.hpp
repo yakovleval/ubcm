@@ -35,6 +35,7 @@ struct OperandResolvers {
     const NameResolver* local{};
     const NameResolver* global{};
     std::optional<RegisterHandle> result;
+    std::function<OperandResult<RegisterAddress>(RegisterClass, const BitVector&)> network;
 };
 
 struct ResolvedReference {

@@ -99,6 +99,10 @@ RegisterResult<RegisterHandle> RegisterBank::create(RegisterClass class_id,
 }
 
 RegisterResult<void> RegisterBank::erase(RegisterHandle handle) {
+    auto entry = find(handle);
+    if (entry && (*entry)->protected_storage) {
+        return std::unexpected(error(RegisterError::Code::immutable, "read-only register"));
+    }
     if (entries_.erase(handle) == 0U) {
         return std::unexpected(error(RegisterError::Code::not_found, "register does not exist"));
     }
@@ -128,7 +132,7 @@ RegisterResult<void> RegisterBank::resize(RegisterHandle handle, std::uint64_t b
     if (!found) {
         return std::unexpected(found.error());
     }
-    if ((*found)->immutable) {
+    if ((*found)->immutable || (*found)->protected_storage) {
         return std::unexpected(error(RegisterError::Code::immutable,
                                       "immutable register cannot be resized"));
     }
@@ -202,7 +206,7 @@ RegisterResult<void> RegisterBank::write(RegisterAddress address, const BitVecto
     if (!found) {
         return std::unexpected(found.error());
     }
-    if ((*found)->immutable) {
+    if ((*found)->immutable || (*found)->protected_storage) {
         return std::unexpected(error(RegisterError::Code::immutable,
                                       "immutable register cannot be written"));
     }
@@ -226,7 +230,7 @@ RegisterResult<const BitVector*> RegisterBank::view(RegisterHandle handle) const
 RegisterResult<void> RegisterBank::replace(RegisterHandle handle, const BitVector& value) {
     auto entry = find(handle);
     if (!entry) return std::unexpected(entry.error());
-    if ((*entry)->immutable) {
+    if ((*entry)->immutable || (*entry)->protected_storage) {
         return std::unexpected(error(RegisterError::Code::immutable, "register is immutable"));
     }
     try {
@@ -266,6 +270,10 @@ RegisterResult<const RegisterBank::Entry*> RegisterBank::find(RegisterHandle han
 void RegisterBank::swap(RegisterBank& other) noexcept {
     entries_.swap(other.entries_);
     std::swap(next_id_, other.next_id_);
+}
+
+void RegisterBank::protect_existing() noexcept {
+    for (auto& [handle, entry] : entries_) entry.protected_storage = true;
 }
 
 }  // namespace ubcm

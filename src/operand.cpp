@@ -54,6 +54,7 @@ OperandResult<RegisterAddress> OperandResolver::resolve_selector(
         resolvers_.result) {
         return RegisterAddress{*resolvers_.result, 0};
     }
+    if (resolvers_.network) return resolvers_.network(selector.class_id, selector.name);
     const NameResolver* resolver = nullptr;
     switch (selector.class_id) {
         case RegisterClass::superlocal:
@@ -138,22 +139,16 @@ OperandResult<ResolvedReference> OperandResolver::resolve_reference_impl(
         if (!resolver) return std::unexpected(resolver.error());
         context = *resolver;
     }
-    if (context.local == nullptr && !(foreign.local_name.size() == 0 && context.result)) {
+    if (context.local == nullptr && !context.network &&
+        !(foreign.local_name.size() == 0 && context.result)) {
         return std::unexpected(error(OperandErrorCode::unresolved_name,
                                      "local register resolver is unavailable"));
     }
-    RegisterResult<RegisterAddress> base =
-        foreign.local_name.size() == 0 && context.result
-            ? RegisterResult<RegisterAddress>{RegisterAddress{*context.result, 0}}
-            : context.local->resolve_address(foreign.local_name);
-    if (!base) return std::unexpected(from_register_error(base.error()));
-    if (foreign.bit_offset > std::numeric_limits<std::uint64_t>::max() -
-                                 base->bit_offset) {
-        return std::unexpected(error(OperandErrorCode::invalid_reference,
-                                     "foreign register offset overflows"));
-    }
-    const auto address = RegisterAddress{
-        base->handle, base->bit_offset + foreign.bit_offset};
+    OperandResolver target(*registers_, procedure_, context);
+    auto resolved = target.resolve_address(
+        {{RegisterClass::local, foreign.local_name}, foreign.bit_offset});
+    if (!resolved) return std::unexpected(resolved.error());
+    const auto address = *resolved;
     if (!foreign.indirect) {
         return ResolvedReference{std::nullopt, address};
     }

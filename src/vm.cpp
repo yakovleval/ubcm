@@ -252,18 +252,14 @@ VmResult<void> VirtualMachine::validate_resize_target(RegisterHandle handle,
 
 OperandResolver VirtualMachine::operand_resolver(const ActivationFrame& frame) const {
     const auto index = static_cast<std::size_t>(&frame - activations_.data());
-    auto context = frame.resolvers;
-    context.result = frame.activation.result_register;
+    auto context = operand_context(index);
     return OperandResolver(*registers_, frame.activation.procedure, context,
         [this, index](std::uint64_t depth) -> OperandResult<OperandResolvers> {
             if (depth > index) {
                 return std::unexpected(OperandError{OperandErrorCode::invalid_reference,
                                                     "activation depth is out of range"});
             }
-            const auto& target = activations_[index - static_cast<std::size_t>(depth)];
-            auto result = target.resolvers;
-            result.result = target.activation.result_register;
-            return result;
+            return operand_context(index - static_cast<std::size_t>(depth));
         });
 }
 
@@ -296,6 +292,7 @@ VmResult<StepResult> VirtualMachine::step(std::uint64_t max_activation_depth) {
         resolvers_.swap(staged_vm.resolvers_);
         owned_.swap(staged_vm.owned_);
         current_storage_ = staged_vm.current_storage_;
+        resolved_address_ = staged_vm.resolved_address_;
         return result;
     } catch (const std::bad_alloc&) {
         return std::unexpected(error(VmErrorCode::resource_exhausted,
@@ -503,6 +500,51 @@ VmResult<StepResult> VirtualMachine::step_impl() {
     auto instruction = decode_builtin(node->command, cursor);
     if (!instruction) {
         return std::unexpected(codec_error(instruction.error()));
+    }
+    const auto suppressed = active_prefix.kind == PrefixKind::condition &&
+                            !active_prefix.condition;
+    if (resolver_steps_ && !suppressed) {
+        switch (instruction->command) {
+            case BuiltinCommand::compute:
+            case BuiltinCommand::copy:
+            case BuiltinCommand::resize_register:
+            case BuiltinCommand::get_register_size:
+            case BuiltinCommand::return_result:
+                return std::unexpected(error(VmErrorCode::register_access,
+                                             "resolver cannot write global registers"));
+            default:
+                break;
+        }
+    }
+    if (instruction->command == BuiltinCommand::resolve_return) {
+        if (!resolver_steps_) {
+            return std::unexpected(error(VmErrorCode::invalid_state,
+                                         "RESOLVE_RETURN is only valid inside a resolver"));
+        }
+        if (suppressed) {
+            owner_activation.prefix = {};
+            read_frame.activation.procedure_position = instruction->next_procedure_position;
+            if (auto saved = persist_activation(read_index); !saved) {
+                return std::unexpected(saved.error());
+            }
+            if (auto saved = persist_activation(owner_index); !saved) {
+                return std::unexpected(saved.error());
+            }
+        } else {
+            const auto& args = std::get<TwoSourceArguments>(instruction->arguments);
+            const auto resolver = operand_resolver(read_frame);
+            auto id = resolver.read_source_uint(args.first);
+            auto offset = resolver.read_source_uint(args.second);
+            if (!id) return std::unexpected(operand_error(id.error()));
+            if (!offset) return std::unexpected(operand_error(offset.error()));
+            if (*id >= (std::uint64_t{1} << 62)) {
+                return std::unexpected(error(VmErrorCode::invalid_state,
+                                             "resolved global register ID exceeds 62 bits"));
+            }
+            resolved_address_ = RegisterAddress{{RegisterClass::global, *id}, *offset};
+        }
+        return StepResult{BuiltinCommand::resolve_return, false, {},
+                          instruction->next_procedure_position};
     }
     const auto is_prefix_command =
         instruction->command == BuiltinCommand::read_prefix ||

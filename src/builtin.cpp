@@ -18,7 +18,7 @@ CodecResult<T> forward_error(const CodecError& source) {
 
 CodecResult<DecodedBuiltin> decode_builtin(std::uint8_t command_value,
                                            BitCursor& procedure) {
-    if (command_value > static_cast<std::uint8_t>(BuiltinCommand::get_register_size)) {
+    if (command_value > static_cast<std::uint8_t>(BuiltinCommand::resolve_return)) {
         return std::unexpected(error(CodecErrorCode::invalid_type, procedure.position(),
                                      "reserved builtin command"));
     }
@@ -79,7 +79,8 @@ CodecResult<DecodedBuiltin> decode_builtin(std::uint8_t command_value,
             arguments = OneSourceArguments{std::move(*source)};
             break;
         }
-        case BuiltinCommand::switch_procedure_and_network: {
+        case BuiltinCommand::switch_procedure_and_network:
+        case BuiltinCommand::resolve_return: {
             auto first = decode_source(input);
             if (!first) return forward_error<DecodedBuiltin>(first.error());
             auto second = decode_source(input);
@@ -107,7 +108,7 @@ CodecResult<DecodedBuiltin> decode_builtin(std::uint8_t command_value,
     }
 
     std::optional<bool> branch;
-    if (command != BuiltinCommand::finish_call) {
+    if (command != BuiltinCommand::finish_call && command != BuiltinCommand::resolve_return) {
         auto branch_bit = input.read_bit();
         if (!branch_bit) return forward_error<DecodedBuiltin>(branch_bit.error());
         branch = *branch_bit;

@@ -24,6 +24,7 @@ enum class BuiltinCommand : std::uint8_t {
     finish_call = 0xb,
     resize_register = 0xc,
     get_register_size = 0xd,
+    resolve_return = 0xe,
 };
 
 struct NoArguments {};

@@ -33,9 +33,9 @@ CodecResult<BitVector> encode_node(const Node& node) {
     output.push_back(node.kind == NodeKind::procedure_call);
 
     if (node.kind == NodeKind::builtin) {
-        if (node.command > 0x0dU) {
+        if (node.command > 0x0eU) {
             return std::unexpected(error(CodecErrorCode::invalid_data, 1,
-                                         "builtin command must be in range 0000..1101"));
+                                         "builtin command must be in range 0000..1110"));
         }
         for (int shift = 14; shift >= 0; --shift) {
             output.push_back(((node.command >> shift) & 1U) != 0U);
@@ -91,7 +91,7 @@ CodecResult<Node> decode_node(BitCursor& cursor) {
 
     Node node;
     if (!*type) {
-        if (*data > 0x0dU || *action != BitVector(192)) {
+        if (*data > 0x0eU || *action != BitVector(192)) {
             return std::unexpected(error(CodecErrorCode::invalid_data, start,
                                          "invalid builtin node header"));
         }

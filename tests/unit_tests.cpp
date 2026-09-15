@@ -295,7 +295,7 @@ void test_builtin_decoder() {
            "finish-call has no branch bit");
 
     ubcm::BitCursor reserved_cursor(finish_bits);
-    expect(!ubcm::decode_builtin(0x0e, reserved_cursor) &&
+    expect(!ubcm::decode_builtin(0x0f, reserved_cursor) &&
                reserved_cursor.position() == 0,
            "reserved builtin command rejection");
 }

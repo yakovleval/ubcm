@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <expected>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -70,6 +71,9 @@ public:
     [[nodiscard]] VmResult<StepResult> step(std::uint64_t max_activation_depth = 256);
     [[nodiscard]] VmResult<RunResult> run(std::uint64_t max_steps = 1000000,
                                          std::uint64_t max_activation_depth = 256);
+    [[nodiscard]] VmResult<void> set_global_resolver(NodeReference entry);
+    [[nodiscard]] OperandResult<RegisterAddress> resolve_name(
+        RegisterClass scope, const BitVector& name, std::uint64_t depth = 0) const;
 
 private:
     [[nodiscard]] ActivationFrame& current_frame() noexcept;
@@ -94,12 +98,21 @@ private:
                                                         const NodeReference& current,
                                                         const NodeReference& next) const;
     [[nodiscard]] OperandResolver operand_resolver(const ActivationFrame& frame) const;
+    [[nodiscard]] OperandResolvers operand_context(std::size_t index) const;
+    [[nodiscard]] OperandResult<RegisterAddress> resolve_register(
+        std::size_t index, RegisterClass scope, const BitVector& name) const;
+    [[nodiscard]] OperandResult<RegisterAddress> run_resolver(
+        std::size_t index, NodeReference entry, const BitVector& name) const;
 
     RegisterBank* registers_;
     RuntimeReference current_storage_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, OperandResolvers> resolvers_;
     std::map<std::pair<std::uint64_t, std::uint64_t>, std::vector<RegisterHandle>> owned_;
     std::vector<ActivationFrame> activations_;
+    NodeReference global_resolver_;
+    std::shared_ptr<std::uint64_t> resolver_steps_;
+    std::uint64_t resolver_depth_{};
+    std::optional<RegisterAddress> resolved_address_;
 };
 
 }  // namespace ubcm

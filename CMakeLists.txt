@@ -22,6 +22,7 @@ add_library(ubcm_vm STATIC
     src/builtin.cpp
     src/operand.cpp
     src/vm.cpp
+    src/resolver.cpp
     src/program.cpp
     src/ubcm.cpp
 )
@@ -60,6 +61,9 @@ if(BUILD_TESTING)
     add_executable(ubcm_program_tests tests/program_tests.cpp)
     target_link_libraries(ubcm_program_tests PRIVATE ubcm::vm)
     add_test(NAME ubcm.program COMMAND ubcm_program_tests)
+    add_executable(ubcm_resolver_tests tests/resolver_tests.cpp)
+    target_link_libraries(ubcm_resolver_tests PRIVATE ubcm::vm)
+    add_test(NAME ubcm.resolver COMMAND ubcm_resolver_tests)
     add_executable(ubcm_codec_fuzz_tests tests/codec_fuzz_tests.cpp)
     target_link_libraries(ubcm_codec_fuzz_tests PRIVATE ubcm::vm)
     add_test(NAME ubcm.codec_fuzz COMMAND ubcm_codec_fuzz_tests)

@@ -68,6 +68,7 @@ private:
 class RegisterBank {
 public:
     void swap(RegisterBank& other) noexcept;
+    void protect_existing() noexcept;
     RegisterResult<RegisterHandle> create(RegisterClass class_id,
                                            const BitVector& contents,
                                            bool immutable = false);
@@ -91,6 +92,7 @@ private:
     struct Entry {
         BitVector contents;
         bool immutable{};
+        bool protected_storage{};
     };
 
     [[nodiscard]] RegisterResult<Entry*> find(RegisterHandle handle);
